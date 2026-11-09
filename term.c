@@ -1,7 +1,15 @@
+#include <stdint.h>
 #include "term.h"
 struct Term {
 	void (*kbd_cb)(void *, int scan_code, int is_pressed);
 	void *kbd;
+#ifdef BUILD_ESP32
+	struct {
+		int code, shift, mod;
+		uint32_t since;
+	} held[8];
+	int nheld;
+#endif
 };
 
 #if !defined(_WIN32)
@@ -88,13 +96,63 @@ static void inject_hw_key(Term *s, int scan_code, int is_pressed)
 	s->kbd_cb(s->kbd, scan_code, is_pressed);
 }
 
+#ifdef BUILD_ESP32
+/* A real key stays down for tens of milliseconds. Games that watch a
+ * make/break flag need the down state to survive at least one main-loop
+ * pass, so the break is deferred instead of following immediately. */
+#define KEY_HOLD_US 80000
+
+uint32_t get_uticks(void);
+
+static void drop_held(Term *s, int i)
+{
+	inject_hw_key(s, s->held[i].code, 0);
+	if (s->held[i].shift)
+		inject_hw_key(s, KEY_SHIFT, 0);
+	if (s->held[i].mod)
+		inject_hw_key(s, s->held[i].mod, 0);
+	for (int j = i; j < s->nheld - 1; j++)
+		s->held[j] = s->held[j + 1];
+	s->nheld--;
+}
+
+static void release_expired(Term *s)
+{
+	for (int i = 0; i < s->nheld;) {
+		if ((uint32_t) (get_uticks() - s->held[i].since) >= KEY_HOLD_US)
+			drop_held(s, i);
+		else
+			i++;
+	}
+}
+
+static void hold_key(Term *s, int code, int shift, int mod)
+{
+	if (s->nheld == (int) (sizeof(s->held) / sizeof(s->held[0])))
+		drop_held(s, 0);
+	s->held[s->nheld].code = code;
+	s->held[s->nheld].shift = shift;
+	s->held[s->nheld].mod = mod;
+	s->held[s->nheld].since = get_uticks();
+	s->nheld++;
+}
+#endif
+
 static void inject_nav_key(Term *s, int code, int pressed)
 {
 	int ext = (code == KEY_UP || code == KEY_DOWN || code == KEY_LEFT ||
 		   code == KEY_RIGHT || code == KEY_HOME || code == KEY_END ||
 		   code == KEY_PAGEUP || code == KEY_PAGEDOWN ||
 		   code == KEY_INSERT || code == KEY_DELETE);
-	inject_hw_key(s, ext ? (0xE000 | code) : code, pressed);
+	int sc = ext ? (0xE000 | code) : code;
+#ifdef BUILD_ESP32
+	if (pressed) {
+		inject_hw_key(s, sc, 1);
+		hold_key(s, sc, 0, 0);
+	}
+#else
+	inject_hw_key(s, sc, pressed);
+#endif
 }
 
 static void inject_key(Term *s, unsigned char mod, unsigned char ch)
@@ -112,11 +170,15 @@ static void inject_key(Term *s, unsigned char mod, unsigned char ch)
 	if (shift)
 		inject_hw_key(s, KEY_SHIFT, 1);
 	inject_hw_key(s, scan, 1);
+#ifdef BUILD_ESP32
+	hold_key(s, scan, shift, mod);
+#else
 	inject_hw_key(s, scan, 0);
 	if (shift)
 		inject_hw_key(s, KEY_SHIFT, 0);
 	if (mod)
 		inject_hw_key(s, mod, 0);
+#endif
 }
 
 typedef enum {
@@ -257,6 +319,7 @@ static void enable_raw_mode()
 void term_step(Term *s)
 {
 #ifdef BUILD_ESP32
+	release_expired(s);
 	unsigned char ch;
 	while (usb_serial_jtag_read_bytes(&ch, 1, 0) == 1) {
 		if (ch == 0x1b) {
@@ -381,7 +444,7 @@ Term *term_init(
 	void (*kbd_cb)(void *, int scan_code, int is_pressed),
 	void *kbd)
 {
-	Term *s = malloc(sizeof(Term));
+	Term *s = calloc(1, sizeof(Term));
 	s->kbd_cb = kbd_cb;
 	s->kbd = kbd;
 	vga_set_text_ops(vga, &ops, NULL);
@@ -395,7 +458,7 @@ Term *term_init_input(
 	void (*kbd_cb)(void *, int scan_code, int is_pressed),
 	void *kbd)
 {
-	Term *s = malloc(sizeof(Term));
+	Term *s = calloc(1, sizeof(Term));
 	s->kbd_cb = kbd_cb;
 	s->kbd = kbd;
 	return s;
