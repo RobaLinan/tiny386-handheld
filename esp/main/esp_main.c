@@ -165,11 +165,11 @@ Console *console_init(int width, int height)
 }
 
 void lcd_draw(int x_start, int y_start, int x_end, int y_end, void *src);
-#ifdef LCD_FILL_PPA
+#ifdef LCD_FILL_DIRECT
 void lcd_fill_frame(void *src, int cx, int cy, int cw, int ch);
 #endif
 
-#if defined(LCD_FILL_SCREEN) && !defined(LCD_FILL_PPA)
+#if defined(LCD_FILL_SCREEN) && !defined(LCD_FILL_DIRECT)
 /* Stretch the picture's on-screen rectangle to the whole panel.
  * The framebuffer is stored transposed (SWAPXY), so one destination
  * row is a column of the logical picture. */
@@ -219,7 +219,7 @@ static void redraw(void *opaque,
 	fill = cw > 0 && ch > 0 &&
 		(cx != 0 || cy != 0 || cw != LCD_WIDTH || ch != LCD_HEIGHT);
 #endif
-#ifdef LCD_FILL_PPA
+#ifdef LCD_FILL_DIRECT
 	if (fill) {
 		int td = get_uticks();
 		lcd_fill_frame(s->fb, cx, cy, cw, ch);
@@ -244,7 +244,7 @@ static void redraw(void *opaque,
 #ifdef LCD_FPS_LOG
 		int tp = get_uticks();
 #endif
-#if defined(LCD_FILL_SCREEN) && !defined(LCD_FILL_PPA)
+#if defined(LCD_FILL_SCREEN) && !defined(LCD_FILL_DIRECT)
 		if (fill) {
 			fill_band(s, cx, cy, cw, ch, y0, y1);
 		} else

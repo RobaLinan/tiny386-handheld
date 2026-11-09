@@ -9,7 +9,7 @@
 
 /* DOS/VGA pictures are 640x400; stretch them to the 800x480 glass with PPA. */
 #define LCD_FILL_SCREEN
-#define LCD_FILL_PPA
+#define LCD_FILL_DIRECT
 #define LCD_NO_BAND_DELAY
 #define LCD_FPS_LOG
 

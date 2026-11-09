@@ -31,8 +31,8 @@
 #include "esp_lcd_st7701.h"
 #include "esp_ldo_regulator.h"
 #include "driver/ledc.h"
-#include "driver/ppa.h"
 #include "esp_heap_caps.h"
+#include "driver/ppa.h"
 //#include "bsp/display.h"
 //#include "bsp/touch.h"
 //#include "bsp/esp-bsp.h"
@@ -210,11 +210,12 @@ static void put_key(void *o, int scan_code, int is_pressed)
 	ps2_put_keycode(o, is_pressed, scan_code);
 }
 
-#ifdef LCD_FILL_PPA
+#ifdef LCD_FILL_DIRECT
 static ppa_client_handle_t ppa_srm;
-static void *ppa_out;
+static void *fill_fb[CONFIG_BSP_JC4880P443C_NUM_FB];
+static int fill_fb_next;
 
-static void lcd_ppa_init(void)
+static void lcd_fill_init(esp_lcd_panel_handle_t panel)
 {
 	ppa_client_config_t cfg = {
 		.oper_type = PPA_OPERATION_SRM,
@@ -222,13 +223,15 @@ static void lcd_ppa_init(void)
 		.data_burst_length = PPA_DATA_BURST_LENGTH_128,
 	};
 	ESP_ERROR_CHECK(ppa_register_client(&cfg, &ppa_srm));
-	ppa_out = heap_caps_aligned_alloc(128, LCD_HEIGHT * LCD_WIDTH * 2,
-					  MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-	assert(ppa_out);
-	memset(ppa_out, 0, LCD_HEIGHT * LCD_WIDTH * 2);
+	ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(
+		panel, CONFIG_BSP_JC4880P443C_NUM_FB,
+		&fill_fb[0], &fill_fb[1]));
+	memset(fill_fb[0], 0, LCD_HEIGHT * LCD_WIDTH * 2);
+	memset(fill_fb[1], 0, LCD_HEIGHT * LCD_WIDTH * 2);
 }
 
-/* Stretch the picture block to the panel with the PPA scaler. The panel is
+/* Stretch the picture block with the PPA scaler straight into the back
+ * frame buffer; draw_bitmap() then only flushes and flips. The panel is
  * scanned portrait, so the transposed framebuffer is used as-is and the
  * logical picture appears landscape. */
 void lcd_fill_frame(void *src, int cx, int cy, int cw, int ch)
@@ -239,6 +242,7 @@ void lcd_fill_frame(void *src, int cx, int cy, int cw, int ch)
 	int oh = (int) (sy * cw);
 	int xoff = (LCD_HEIGHT - ow) / 2;
 	int yoff = (LCD_WIDTH - oh) / 2;
+	int idx = fill_fb_next ^ 1;
 
 	ppa_srm_oper_config_t c = {
 		.in.buffer = src,
@@ -249,7 +253,7 @@ void lcd_fill_frame(void *src, int cx, int cy, int cw, int ch)
 		.in.block_offset_x = cy,
 		.in.block_offset_y = cx,
 		.in.srm_cm = PPA_SRM_COLOR_MODE_RGB565,
-		.out.buffer = ppa_out,
+		.out.buffer = fill_fb[idx],
 		.out.buffer_size = LCD_HEIGHT * LCD_WIDTH * 2,
 		.out.pic_w = LCD_HEIGHT,
 		.out.pic_h = LCD_WIDTH,
@@ -264,7 +268,8 @@ void lcd_fill_frame(void *src, int cx, int cy, int cw, int ch)
 	ESP_ERROR_CHECK(ppa_do_scale_rotate_mirror(ppa_srm, &c));
 	ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(globals.panel, 0, 0,
 						  LCD_HEIGHT, LCD_WIDTH,
-						  ppa_out));
+						  fill_fb[idx]));
+	fill_fb_next = idx;
 }
 #endif
 
@@ -356,8 +361,8 @@ void vga_task(void *arg)
 
 	bsp_display_brightness_init();
 	bsp_display_brightness_set(30);
-#ifdef LCD_FILL_PPA
-	lcd_ppa_init();
+#ifdef LCD_FILL_DIRECT
+	lcd_fill_init(panel);
 #endif
 
 	globals.panel = panel;
