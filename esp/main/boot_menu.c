@@ -427,10 +427,10 @@ void boot_menu_gestures(void)
 		int dx = x - start_x;
 		int dy = start_y - y;   /* swipe up is positive */
 
-		if (abs(dy) > 12 && abs(dy) > abs(dx))
+		if (abs(dy) > 20 && abs(dy) > abs(dx))
 			moved = 1;
 		if (moved) {
-			int val = start_val + dy * 100 / 300;
+			int val = start_val + dy * 100 / 480;
 
 			if (side) {
 				if (val < 0)

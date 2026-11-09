@@ -48,7 +48,7 @@ static i2s_chan_handle_t                rx_chan;        // I2S rx channel handle
 #include "esp_codec_dev_vol.h"
 static const char *TAG = "i2s";
 static esp_codec_dev_handle_t s_codec;
-static int s_volume = 80;
+static int s_volume = 50;
 
 int i2s_get_volume(void)
 {
@@ -144,7 +144,7 @@ static esp_err_t es8311_codec_init(void)
 	}
 
 	/* Set the initial volume and gain */
-	if (esp_codec_dev_set_out_vol(codec_handle, 80) != ESP_CODEC_DEV_OK) {
+	if (esp_codec_dev_set_out_vol(codec_handle, 50) != ESP_CODEC_DEV_OK) {
 		ESP_LOGE(TAG, "set output volume failed");
 		return ESP_FAIL;
 	}
