@@ -202,9 +202,9 @@ P4-specific notes:
   buffer, so enter `D:\PAL.BAT` rather than a longer path. Injected keys are held
   down for 80 ms before the break is sent; games that watch a make/break flag
   instead of polling the BIOS buffer (PAL) need this.
-- Touch boot menu (GT911 on I2C0, SDA 7/SCL 8): choose PAL, FD2 or the DOS
-  prompt. Once DOS shows `C:\>`, the firmware types `D:\PAL.BAT` or `D:\FD2`
-  for the selected game. Those batch files live on the games disk image.
+- Touch boot menu (GT911 on I2C0, SDA 7/SCL 8): choose PAL or FD2. Once DOS
+  shows `C:\>`, the firmware types `D:\PAL.BAT` or `D:\FD2` for the selected
+  game. Those batch files live on the games disk image.
 - Menu entries live in the `games[]` table in `esp/main/boot_menu.c` (title,
   subtitle, launch command, background). Each entry can use an 800x480 RGB565
   background at `/sdcard/menu/<name>.raw`, generated from any image with

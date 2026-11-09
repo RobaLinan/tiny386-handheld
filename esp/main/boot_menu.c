@@ -28,14 +28,13 @@ struct game_entry {
 static const struct game_entry games[] = {
 	{ "PAL", "Xian Jian", "D:\\PAL.BAT\r", "/sdcard/menu/pal.raw" },
 	{ "FD2", "Yan Long 2", "D:\\FD2\r", "/sdcard/menu/fd2.raw" },
-	{ "DOS", "Command", NULL, "/sdcard/menu/dos.raw" },
 };
 
 #define NGAMES ((int) (sizeof(games) / sizeof(games[0])))
 #define MENU_COLS 3
 
 /* Selected entry; read by pc_main(). */
-int boot_choice = 2;
+int boot_choice = 0;
 
 const char *boot_menu_cmd(int idx)
 {
@@ -206,10 +205,10 @@ int boot_menu(esp_lcd_panel_handle_t panel)
 	menu_panel = panel;
 	if (esp_lcd_dpi_panel_get_frame_buffer(panel, 1, (void **) &menu_fb)
 	    != ESP_OK || !menu_fb)
-		return 2;
+		return 0;
 	if (touch_init() != ESP_OK) {
-		ESP_LOGE(TAG, "GT911 init failed, booting DOS");
-		return 2;
+		ESP_LOGE(TAG, "GT911 init failed, booting the first game");
+		return 0;
 	}
 
 	ESP_LOGI(TAG, "menu ready");
