@@ -19,6 +19,10 @@
 #include "../../ini.h"
 
 extern const uint8_t vgafont16[256 * 16];
+extern esp_err_t bsp_display_brightness_set(uint8_t percent);
+int lcd_get_brightness(void);
+void i2s_set_volume(int vol);
+int i2s_get_volume(void);
 
 /* Games come from /sdcard/menu.ini:
  *
@@ -395,6 +399,58 @@ static void touch_to_menu(uint16_t rx, uint16_t ry, int *x, int *y)
 {
 	*x = ry;
 	*y = MENU_H - 1 - rx;
+}
+
+/* In-game gestures: swipe up/down on the left half for brightness, on the
+ * right half for volume. No on-screen indicator. Polled from vga_task. */
+void boot_menu_gestures(void)
+{
+	static int active, side, start_x, start_y, start_val, moved;
+	uint16_t rx = 0, ry = 0, strength[1];
+	uint8_t cnt = 0;
+	int x, y;
+
+	if (!tp)
+		return;
+	esp_lcd_touch_read_data(tp);
+	int down = esp_lcd_touch_get_coordinates(tp, &rx, &ry, strength, &cnt,
+						 1) && cnt;
+	touch_to_menu(rx, ry, &x, &y);
+	if (down && !active) {
+		active = 1;
+		moved = 0;
+		start_x = x;
+		start_y = y;
+		side = x < MENU_W / 2 ? 0 : 1;
+		start_val = side ? i2s_get_volume() : lcd_get_brightness();
+	} else if (down && active) {
+		int dx = x - start_x;
+		int dy = start_y - y;   /* swipe up is positive */
+
+		if (abs(dy) > 12 && abs(dy) > abs(dx))
+			moved = 1;
+		if (moved) {
+			int val = start_val + dy * 100 / 300;
+
+			if (side) {
+				if (val < 0)
+					val = 0;
+				if (val > 100)
+					val = 100;
+				if (val != i2s_get_volume())
+					i2s_set_volume(val);
+			} else {
+				if (val < 10)
+					val = 10;
+				if (val > 100)
+					val = 100;
+				if (val != lcd_get_brightness())
+					bsp_display_brightness_set(val);
+			}
+		}
+	} else if (!down && active) {
+		active = 0;
+	}
 }
 
 int boot_menu(esp_lcd_panel_handle_t panel)

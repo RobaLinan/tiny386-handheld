@@ -177,11 +177,19 @@ esp_err_t bsp_display_backlight_on(void)
 	return ledc_update_duty(LEDC_LOW_SPEED_MODE, CONFIG_BSP_JC4880P443C_BACKLIGHT_CHANNEL);
 }
 
+static int lcd_brightness = 30;
+
+int lcd_get_brightness(void)
+{
+	return lcd_brightness;
+}
+
 esp_err_t bsp_display_brightness_set(uint8_t brightness_percent)
 {
 	if (brightness_percent > 100) {
 		return ESP_ERR_INVALID_ARG;
 	}
+	lcd_brightness = brightness_percent;
 
 	ESP_RETURN_ON_ERROR(bsp_display_brightness_init(), TAG, "bl init");
 
@@ -288,6 +296,7 @@ void lcd_fill_frame(void *src, int cx, int cy, int cw, int ch)
 #ifdef BOOT_MENU
 extern int boot_choice;
 int boot_menu(esp_lcd_panel_handle_t panel);
+void boot_menu_gestures(void);
 #endif
 
 void vga_task(void *arg)
@@ -406,6 +415,9 @@ void vga_task(void *arg)
 		pc_vga_step(globals.pc);
 #ifdef USE_USB_SERIAL_KBD
 		term_step(term);
+#endif
+#ifdef BOOT_MENU
+		boot_menu_gestures();
 #endif
 		vTaskDelay(10 / portTICK_PERIOD_MS);
 	}

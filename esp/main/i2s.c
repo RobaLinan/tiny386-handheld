@@ -48,16 +48,22 @@ static i2s_chan_handle_t                rx_chan;        // I2S rx channel handle
 #include "esp_codec_dev_vol.h"
 static const char *TAG = "i2s";
 static esp_codec_dev_handle_t s_codec;
+static int s_volume = 80;
+
+int i2s_get_volume(void)
+{
+	return s_volume;
+}
 
 void i2s_set_volume(int vol)
 {
-	if (!s_codec)
-		return;
 	if (vol < 0)
 		vol = 0;
 	if (vol > 100)
 		vol = 100;
-	if (esp_codec_dev_set_out_vol(s_codec, vol) == ESP_CODEC_DEV_OK)
+	s_volume = vol;
+	if (s_codec &&
+	    esp_codec_dev_set_out_vol(s_codec, vol) == ESP_CODEC_DEV_OK)
 		fprintf(stderr, "audio volume %d\n", vol);
 }
 
