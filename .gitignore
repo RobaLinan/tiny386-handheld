@@ -1,0 +1,16 @@
+*~
+*.o
+*.d
+.depends
+out/
+tiny386
+tiny386.exe
+tiny386_headless
+wifikbd
+wifikbd.exe
+initnet
+esp/build/
+esp/build_*/
+esp/managed_components/
+esp/sdkconfig
+esp/main/fb_dos.img
