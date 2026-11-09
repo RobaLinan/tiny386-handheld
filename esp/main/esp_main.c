@@ -29,6 +29,7 @@
 #include "../../ini.h"
 #include "../../pc.h"
 #include "../../i8042.h"
+#include "../../term.h"
 #include "common.h"
 
 //
@@ -288,29 +289,8 @@ static void redraw(void *opaque,
 #ifdef BOOT_MENU
 extern int boot_choice;
 
-struct boot_key {
-	char ch;
-	unsigned char scan;
-	unsigned char shift;
-};
-
-static const struct boot_key boot_keys[] = {
-	{' ', 0x39, 0}, {'.', 0x34, 0}, {'2', 0x03, 0}, {':', 0x27, 1},
-	{'\\', 0x2B, 0}, {'A', 0x1E, 0}, {'B', 0x30, 0}, {'D', 0x20, 0},
-	{'F', 0x21, 0}, {'L', 0x26, 0}, {'N', 0x31, 0}, {'P', 0x19, 0},
-	{'T', 0x14, 0}, {'Y', 0x15, 0}, {'\r', 0x1C, 0},
-};
-
-static int boot_key_scan(char c, int *shift)
-{
-	for (int i = 0; i < (int)(sizeof(boot_keys) / sizeof(boot_keys[0])); i++) {
-		if (boot_keys[i].ch == c) {
-			*shift = boot_keys[i].shift;
-			return boot_keys[i].scan;
-		}
-	}
-	return 0;
-}
+extern int boot_choice;
+const char *boot_menu_cmd(int idx);
 
 static int dos_prompt_visible(PC *pc)
 {
@@ -345,7 +325,11 @@ static void boot_autolaunch(PC *pc)
 		next_scan = now + 200000;
 		if (!dos_prompt_visible(pc))
 			return;
-		cmd = boot_choice == 0 ? "D:\\PAL.BAT\r" : "D:\\FD2\r";
+		cmd = boot_menu_cmd(boot_choice);
+		if (!cmd) {
+			done = 1;
+			return;
+		}
 		fprintf(stderr, "autolaunch: prompt found, typing %s\n", cmd);
 		started = 1;
 		pos = 0;
@@ -370,7 +354,7 @@ static void boot_autolaunch(PC *pc)
 		return;
 	}
 	int shift = 0;
-	int scan = boot_key_scan(cmd[pos], &shift);
+	int scan = term_ascii_to_scan(cmd[pos], &shift);
 	pos++;
 	if (!scan) {
 		t = now;

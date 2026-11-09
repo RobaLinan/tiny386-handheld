@@ -91,6 +91,18 @@ static const unsigned char ascii_to_scan[2][256] = {
 	}
 };
 
+int term_ascii_to_scan(unsigned char ch, int *shift)
+{
+	unsigned char scan = ascii_to_scan[0][ch];
+	if (scan) {
+		*shift = 0;
+		return scan;
+	}
+	scan = ascii_to_scan[1][ch];
+	*shift = scan ? 1 : 0;
+	return scan;
+}
+
 static void inject_hw_key(Term *s, int scan_code, int is_pressed)
 {
 	s->kbd_cb(s->kbd, scan_code, is_pressed);

@@ -16,16 +16,40 @@
 
 extern const uint8_t vgafont16[256 * 16];
 
-/* 0 = PAL (PAL!), 1 = FD2, 2 = DOS prompt. Read by pc_main(). */
+/* Add a game here plus an 800x480 RGB565 background on the SD card.
+ * `cmd` is typed once DOS shows its prompt; NULL keeps the DOS prompt. */
+struct game_entry {
+	const char *title;
+	const char *sub;
+	const char *cmd;
+	const char *bg;
+};
+
+static const struct game_entry games[] = {
+	{ "PAL", "Xian Jian", "D:\\PAL.BAT\r", "/sdcard/menu/pal.raw" },
+	{ "FD2", "Yan Long 2", "D:\\FD2\r", "/sdcard/menu/fd2.raw" },
+	{ "DOS", "Command", NULL, "/sdcard/menu/dos.raw" },
+};
+
+#define NGAMES ((int) (sizeof(games) / sizeof(games[0])))
+#define MENU_COLS 3
+
+/* Selected entry; read by pc_main(). */
 int boot_choice = 2;
+
+const char *boot_menu_cmd(int idx)
+{
+	return (idx >= 0 && idx < NGAMES) ? games[idx].cmd : NULL;
+}
 
 static const char *TAG = "bootmenu";
 static esp_lcd_touch_handle_t tp;
-static uint16_t *menu_fb;
 static esp_lcd_panel_handle_t menu_panel;
+static uint16_t *menu_fb;
 
 #define MENU_W LCD_WIDTH    /* 800, logical x */
 #define MENU_H LCD_HEIGHT   /* 480, logical y */
+#define BG_BYTES ((size_t) MENU_W * MENU_H * 2)
 
 /* The panel scans portrait: logical (x, y) lives at x * MENU_H + y. */
 static inline void put_px(int x, int y, uint16_t c)
@@ -39,6 +63,16 @@ static void fill_rect(int x0, int y0, int x1, int y1, uint16_t c)
 	for (int x = x0; x < x1; x++)
 		for (int y = y0; y < y1; y++)
 			put_px(x, y, c);
+}
+
+/* Halve the brightness of a rectangle, leaving translucent-looking bars. */
+static void dim_rect(int x0, int y0, int x1, int y1)
+{
+	for (int x = x0; x < x1; x++)
+		for (int y = y0; y < y1; y++) {
+			uint16_t c = menu_fb[x * MENU_H + y];
+			menu_fb[x * MENU_H + y] = (c >> 1) & 0x7BEF;
+		}
 }
 
 static void draw_text(int x, int y, const char *s, int scale, uint16_t c)
@@ -58,46 +92,78 @@ static void draw_text(int x, int y, const char *s, int scale, uint16_t c)
 	}
 }
 
-struct button {
-	int x0, y0, x1, y1;
-	const char *title;
-	const char *sub;
-	uint16_t bg;
-};
-
-static struct button buttons[3] = {
-	{  30, 240, 250, 380, "PAL", "Xian Jian", 0x2945 },
-	{ 290, 240, 510, 380, "FD2", "Yan Long 2", 0x2945 },
-	{ 550, 240, 770, 380, "DOS", "Command",   0x2945 },
-};
-
-static void draw_button(struct button *b, int pressed)
+static void draw_text_shadow(int x, int y, const char *s, int scale,
+			     uint16_t c)
 {
-	uint16_t bg = pressed ? 0x0600 : b->bg;
-	uint16_t border = pressed ? 0x07E0 : 0x7BEF;
-	int tw = (int) strlen(b->title) * 8 * 4;
-	int sw = (int) strlen(b->sub) * 8 * 2;
-
-	fill_rect(b->x0, b->y0, b->x1, b->y1, bg);
-	fill_rect(b->x0, b->y0, b->x1, b->y0 + 3, border);
-	fill_rect(b->x0, b->y1 - 3, b->x1, b->y1, border);
-	fill_rect(b->x0, b->y0, b->x0 + 3, b->y1, border);
-	fill_rect(b->x1 - 3, b->y0, b->x1, b->y1, border);
-	draw_text(b->x0 + (b->x1 - b->x0 - tw) / 2, b->y0 + 24,
-		  b->title, 4, 0xFFFF);
-	draw_text(b->x0 + (b->x1 - b->x0 - sw) / 2, b->y0 + 96,
-		  b->sub, 2, 0xD69A);
+	draw_text(x + 2, y + 2, s, scale, 0x0000);
+	draw_text(x, y, s, scale, c);
 }
 
-static void draw_menu(int pressed)
+static void flip(void)
 {
-	fill_rect(0, 0, MENU_W, MENU_H, 0x0841);
-	draw_text((MENU_W - 11 * 8 * 4) / 2, 40, "TINY386 DOS", 4, 0xFFFF);
-	draw_text((MENU_W - 14 * 8 * 2) / 2, 130, "touch to boot a game", 2,
-		  0xA514);
-	for (int i = 0; i < 3; i++)
-		draw_button(&buttons[i], i == pressed);
 	esp_lcd_panel_draw_bitmap(menu_panel, 0, 0, MENU_H, MENU_W, menu_fb);
+}
+
+static void load_bg(int idx)
+{
+	FILE *f = fopen(games[idx].bg, "rb");
+	size_t got = 0;
+
+	if (f) {
+		got = fread(menu_fb, 1, BG_BYTES, f);
+		fclose(f);
+	}
+	if (got != BG_BYTES) {
+		ESP_LOGW(TAG, "%s missing, solid background", games[idx].bg);
+		fill_rect(0, 0, MENU_W, MENU_H, 0x0841);
+	}
+}
+
+/* Three columns in the bottom strip; rows are added for more games. */
+static void button_rect(int i, int *x0, int *y0, int *x1, int *y1)
+{
+	int rows = (NGAMES + MENU_COLS - 1) / MENU_COLS;
+	int col = i % MENU_COLS, row = i / MENU_COLS;
+	int margin = 12, gap = 12;
+	int bw = (MENU_W - margin * 2 - gap * (MENU_COLS - 1)) / MENU_COLS;
+	int bh = 112;
+	int by = MENU_H - 12 - rows * (bh + gap);
+	*x0 = margin + col * (bw + gap);
+	*x1 = *x0 + bw;
+	*y0 = by + row * (bh + gap);
+	*y1 = *y0 + bh;
+}
+
+static void draw_menu(int selected)
+{
+	int x0, y0, x1, y1;
+	int rows = (NGAMES + MENU_COLS - 1) / MENU_COLS;
+	int top = MENU_H - 12 - rows * 124 - 8;
+
+	load_bg(selected);
+	dim_rect(0, 0, MENU_W, 40);
+	dim_rect(0, top, MENU_W, MENU_H);
+	draw_text_shadow(16, 10, "TINY386", 2, 0xFFFF);
+
+	for (int i = 0; i < NGAMES; i++) {
+		button_rect(i, &x0, &y0, &x1, &y1);
+		int sel = i == selected;
+		uint16_t border = sel ? 0x07E0 : 0x7BEF;
+		int tw = (int) strlen(games[i].title) * 8 * 3;
+		int sw = (int) strlen(games[i].sub) * 8;
+
+		if (sel)
+			fill_rect(x0 + 3, y0 + 3, x1 - 3, y1 - 3, 0x18E3);
+		fill_rect(x0, y0, x1, y0 + 2, border);
+		fill_rect(x0, y1 - 2, x1, y1, border);
+		fill_rect(x0, y0, x0 + 2, y1, border);
+		fill_rect(x1 - 2, y0, x1, y1, border);
+		draw_text_shadow(x0 + (x1 - x0 - tw) / 2, y0 + 18,
+				 games[i].title, 3, sel ? 0x07E0 : 0xFFFF);
+		draw_text(x0 + (x1 - x0 - sw) / 2, y0 + 78,
+			  games[i].sub, 1, sel ? 0x07E0 : 0xD69A);
+	}
+	flip();
 }
 
 static esp_err_t touch_init(void)
@@ -147,7 +213,7 @@ int boot_menu(esp_lcd_panel_handle_t panel)
 	}
 
 	ESP_LOGI(TAG, "menu ready");
-	draw_menu(-1);
+	draw_menu(0);
 	vTaskDelay(pdMS_TO_TICKS(100));
 
 	for (;;) {
@@ -160,14 +226,12 @@ int boot_menu(esp_lcd_panel_handle_t panel)
 			touch_to_menu(rx, ry, &x, &y);
 			fprintf(stderr, "menu: touch %d,%d -> %d,%d\n",
 				rx, ry, x, y);
-			for (int i = 0; i < 3; i++) {
-				if (x >= buttons[i].x0 && x < buttons[i].x1 &&
-				    y >= buttons[i].y0 && y < buttons[i].y1) {
-					draw_button(&buttons[i], 1);
-					esp_lcd_panel_draw_bitmap(menu_panel,
-								  0, 0, MENU_H,
-								  MENU_W, menu_fb);
-					vTaskDelay(pdMS_TO_TICKS(150));
+			for (int i = 0; i < NGAMES; i++) {
+				int x0, y0, x1, y1;
+				button_rect(i, &x0, &y0, &x1, &y1);
+				if (x >= x0 && x < x1 && y >= y0 && y < y1) {
+					draw_menu(i);
+					vTaskDelay(pdMS_TO_TICKS(250));
 					return i;
 				}
 			}
