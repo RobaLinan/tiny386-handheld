@@ -296,7 +296,7 @@ void lcd_fill_frame(void *src, int cx, int cy, int cw, int ch)
 #ifdef BOOT_MENU
 extern int boot_choice;
 int boot_menu(esp_lcd_panel_handle_t panel);
-void boot_menu_gestures(void);
+void boot_menu_start_gestures(void);
 #endif
 
 void vga_task(void *arg)
@@ -392,6 +392,7 @@ void vga_task(void *arg)
 #endif
 #ifdef BOOT_MENU
 	boot_choice = boot_menu(panel);
+	boot_menu_start_gestures();
 	/* Drop any menu leftovers so nothing blinks through the first frames. */
 #ifdef LCD_FILL_DIRECT
 	memset(fill_fb[0], 0, LCD_HEIGHT * LCD_WIDTH * 2);
@@ -415,9 +416,6 @@ void vga_task(void *arg)
 		pc_vga_step(globals.pc);
 #ifdef USE_USB_SERIAL_KBD
 		term_step(term);
-#endif
-#ifdef BOOT_MENU
-		boot_menu_gestures();
 #endif
 		vTaskDelay(10 / portTICK_PERIOD_MS);
 	}

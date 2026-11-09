@@ -377,7 +377,7 @@ static esp_err_t touch_init(void)
 	esp_lcd_panel_io_handle_t io = NULL;
 	esp_lcd_panel_io_i2c_config_t io_cfg =
 		ESP_LCD_TOUCH_IO_I2C_GT911_CONFIG();
-	io_cfg.scl_speed_hz = 100000;
+	io_cfg.scl_speed_hz = 400000;
 	err = esp_lcd_new_panel_io_i2c(bus, &io_cfg, &io);
 	if (err != ESP_OK)
 		return err;
@@ -453,6 +453,20 @@ void boot_menu_gestures(void)
 			}
 		}
 	}
+}
+
+static void gesture_task(void *arg)
+{
+	(void) arg;
+	for (;;) {
+		boot_menu_gestures();
+		vTaskDelay(pdMS_TO_TICKS(20));
+	}
+}
+
+void boot_menu_start_gestures(void)
+{
+	xTaskCreatePinnedToCore(gesture_task, "gestures", 4096, NULL, 1, NULL, 0);
 }
 
 int boot_menu(esp_lcd_panel_handle_t panel)
