@@ -266,6 +266,18 @@ void lcd_fill_frame(void *src, int cx, int cy, int cw, int ch)
 		.mode = PPA_TRANS_MODE_BLOCKING,
 	};
 	ESP_ERROR_CHECK(ppa_do_scale_rotate_mirror(ppa_srm, &c));
+	/* PPA's scale step is 1/16, so 1.2 comes out as 1.1875 (475 of 480
+	 * columns). Keep the uncovered columns black or they flash with the
+	 * previous frame's (menu) content when the buffers flip. */
+	int sx_int = (int) sx;
+	int sx_frag = (int) (sx * 16) & 15;
+	int eff_w = sx_int * ch + sx_frag * ch / 16;
+	int start = (xoff < 0 ? 0 : xoff) + eff_w;
+	if (start < LCD_HEIGHT) {
+		uint16_t *fb = fill_fb[idx];
+		for (int x = start; x < LCD_HEIGHT; x++)
+			memset(fb + (size_t) x * LCD_WIDTH, 0, LCD_WIDTH * 2);
+	}
 	ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(globals.panel, 0, 0,
 						  LCD_HEIGHT, LCD_WIDTH,
 						  fill_fb[idx]));
