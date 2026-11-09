@@ -10,28 +10,36 @@
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_lcd_touch.h"
 #include "esp_lcd_touch_gt911.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "common.h"
 
 extern const uint8_t vgafont16[256 * 16];
 
-/* Add a game here plus an 800x480 RGB565 background on the SD card.
- * `cmd` is typed once DOS shows its prompt; NULL keeps the DOS prompt. */
+/* Add a game here plus a 800x480 background and a 380x214 thumbnail on
+ * the SD card (scripts/menu_bg.py writes both). `cmd` is typed once DOS
+ * shows its prompt. */
 struct game_entry {
 	const char *title;
-	const char *sub;
 	const char *cmd;
 	const char *bg;
+	const char *thumb;
 };
 
 static const struct game_entry games[] = {
-	{ "PAL", "Xian Jian", "D:\\PAL.BAT\r", "/sdcard/menu/pal.raw" },
-	{ "FD2", "Yan Long 2", "D:\\FD2\r", "/sdcard/menu/fd2.raw" },
+	{ "PAL", "D:\\PAL.BAT\r", "/sdcard/menu/pal.raw",
+	  "/sdcard/menu/pal_thumb.raw" },
+	{ "FD2", "D:\\FD2\r", "/sdcard/menu/fd2.raw",
+	  "/sdcard/menu/fd2_thumb.raw" },
 };
 
 #define NGAMES ((int) (sizeof(games) / sizeof(games[0])))
 #define MENU_COLS 3
+#define THUMB_W 380
+#define THUMB_H 214
+#define CARD_H 250
+#define TITLE_H 40
 
 /* Selected entry; read by pc_main(). */
 int boot_choice = 0;
@@ -45,10 +53,12 @@ static const char *TAG = "bootmenu";
 static esp_lcd_touch_handle_t tp;
 static esp_lcd_panel_handle_t menu_panel;
 static uint16_t *menu_fb;
+static uint16_t *thumbs[NGAMES];
 
 #define MENU_W LCD_WIDTH    /* 800, logical x */
 #define MENU_H LCD_HEIGHT   /* 480, logical y */
 #define BG_BYTES ((size_t) MENU_W * MENU_H * 2)
+#define THUMB_BYTES ((size_t) THUMB_W * THUMB_H * 2)
 
 /* The panel scans portrait: logical (x, y) lives at x * MENU_H + y. */
 static inline void put_px(int x, int y, uint16_t c)
@@ -118,50 +128,83 @@ static void load_bg(int idx)
 	}
 }
 
-/* Three columns in the bottom strip; rows are added for more games. */
-static void button_rect(int i, int *x0, int *y0, int *x1, int *y1)
+static void load_thumbs(void)
 {
-	int rows = (NGAMES + MENU_COLS - 1) / MENU_COLS;
-	int col = i % MENU_COLS, row = i / MENU_COLS;
+	for (int i = 0; i < NGAMES; i++) {
+		thumbs[i] = heap_caps_malloc(THUMB_BYTES,
+					     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+		if (!thumbs[i])
+			continue;
+		memset(thumbs[i], 0, THUMB_BYTES);
+		FILE *f = fopen(games[i].thumb, "rb");
+		if (f) {
+			fread(thumbs[i], 1, THUMB_BYTES, f);
+			fclose(f);
+		} else {
+			ESP_LOGW(TAG, "%s missing", games[i].thumb);
+		}
+	}
+}
+
+/* Scale the cached thumbnail (transposed layout) into a card. */
+static void draw_thumb(int idx, int x0, int y0, int w, int h)
+{
+	const uint16_t *src = thumbs[idx];
+
+	if (!src)
+		return;
+	for (int dy = 0; dy < h; dy++) {
+		int sy = dy * THUMB_H / h;
+		for (int dx = 0; dx < w; dx++) {
+			int sx = dx * THUMB_W / w;
+			put_px(x0 + dx, y0 + dy, src[sx * THUMB_H + sy]);
+		}
+	}
+}
+
+static void card_rect(int i, int *x0, int *y0, int *x1, int *y1)
+{
+	int cols = NGAMES < MENU_COLS ? NGAMES : MENU_COLS;
+	int col = i % cols, row = i / cols;
 	int margin = 12, gap = 12;
-	int bw = (MENU_W - margin * 2 - gap * (MENU_COLS - 1)) / MENU_COLS;
-	int bh = 112;
-	int by = MENU_H - 12 - rows * (bh + gap);
-	*x0 = margin + col * (bw + gap);
+	int bw = (MENU_W - margin * 2 - gap * (cols - 1)) / cols;
+	int total = cols * bw + gap * (cols - 1);
+	int left = (MENU_W - total) / 2;
+
+	*x0 = left + col * (bw + gap);
 	*x1 = *x0 + bw;
-	*y0 = by + row * (bh + gap);
-	*y1 = *y0 + bh;
+	*y0 = MENU_H - margin - CARD_H + row * (CARD_H + gap);
+	*y1 = *y0 + CARD_H;
+}
+
+static void draw_card(int i, int selected)
+{
+	int x0, y0, x1, y1;
+
+	card_rect(i, &x0, &y0, &x1, &y1);
+	uint16_t border = selected ? 0x07E0 : 0x7BEF;
+	uint16_t fg = selected ? 0x07E0 : 0xFFFF;
+	int tw = (int) strlen(games[i].title) * 8 * 2;
+
+	fill_rect(x0 + 2, y0 + 2, x1 - 2, y1 - 2, 0x10A2);
+	fill_rect(x0, y0, x1, y0 + 3, border);
+	fill_rect(x0, y1 - 3, x1, y1, border);
+	fill_rect(x0, y0, x0 + 3, y1, border);
+	fill_rect(x1 - 3, y0, x1, y1, border);
+	draw_text_shadow(x0 + (x1 - x0 - tw) / 2, y0 + 8, games[i].title, 2,
+			 fg);
+	draw_thumb(i, x0 + 4, y0 + TITLE_H, (x1 - x0) - 8,
+		   (y1 - y0) - TITLE_H - 4);
 }
 
 static void draw_menu(int selected)
 {
-	int x0, y0, x1, y1;
-	int rows = (NGAMES + MENU_COLS - 1) / MENU_COLS;
-	int top = MENU_H - 12 - rows * 124 - 8;
-
 	load_bg(selected);
 	dim_rect(0, 0, MENU_W, 40);
-	dim_rect(0, top, MENU_W, MENU_H);
+	dim_rect(0, MENU_H - CARD_H - 24, MENU_W, MENU_H);
 	draw_text_shadow(16, 10, "TINY386", 2, 0xFFFF);
-
-	for (int i = 0; i < NGAMES; i++) {
-		button_rect(i, &x0, &y0, &x1, &y1);
-		int sel = i == selected;
-		uint16_t border = sel ? 0x07E0 : 0x7BEF;
-		int tw = (int) strlen(games[i].title) * 8 * 3;
-		int sw = (int) strlen(games[i].sub) * 8;
-
-		if (sel)
-			fill_rect(x0 + 3, y0 + 3, x1 - 3, y1 - 3, 0x18E3);
-		fill_rect(x0, y0, x1, y0 + 2, border);
-		fill_rect(x0, y1 - 2, x1, y1, border);
-		fill_rect(x0, y0, x0 + 2, y1, border);
-		fill_rect(x1 - 2, y0, x1, y1, border);
-		draw_text_shadow(x0 + (x1 - x0 - tw) / 2, y0 + 18,
-				 games[i].title, 3, sel ? 0x07E0 : 0xFFFF);
-		draw_text(x0 + (x1 - x0 - sw) / 2, y0 + 78,
-			  games[i].sub, 1, sel ? 0x07E0 : 0xD69A);
-	}
+	for (int i = 0; i < NGAMES; i++)
+		draw_card(i, i == selected);
 	flip();
 }
 
@@ -210,6 +253,7 @@ int boot_menu(esp_lcd_panel_handle_t panel)
 		ESP_LOGE(TAG, "GT911 init failed, booting the first game");
 		return 0;
 	}
+	load_thumbs();
 
 	ESP_LOGI(TAG, "menu ready");
 	draw_menu(0);
@@ -227,7 +271,7 @@ int boot_menu(esp_lcd_panel_handle_t panel)
 				rx, ry, x, y);
 			for (int i = 0; i < NGAMES; i++) {
 				int x0, y0, x1, y1;
-				button_rect(i, &x0, &y0, &x1, &y1);
+				card_rect(i, &x0, &y0, &x1, &y1);
 				if (x >= x0 && x < x1 && y >= y0 && y < y1) {
 					draw_menu(i);
 					vTaskDelay(pdMS_TO_TICKS(250));
