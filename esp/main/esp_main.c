@@ -167,6 +167,38 @@ Console *console_init(int width, int height)
 }
 
 void lcd_draw(int x_start, int y_start, int x_end, int y_end, void *src);
+
+#ifdef LCD_FPS_OVERLAY
+extern const uint8_t vgafont16[256 * 16];
+
+static void fps_px(Console *s, int x, int y, uint16_t c)
+{
+	if (x >= 0 && x < LCD_WIDTH && y >= 0 && y < LCD_HEIGHT)
+		((uint16_t *) s->fb)[x * LCD_HEIGHT + y] = c;
+}
+
+/* Small "N FPS" in the top-left of the picture, like a Steam Deck overlay.
+ * Drawn into the VGA buffer so the PPA scales it with the frame. */
+static void draw_fps_overlay(Console *s, int cx, int cy, int fps)
+{
+	char buf[16];
+	int x0 = cx + 4, y0 = cy + 4;
+
+	snprintf(buf, sizeof(buf), "%d FPS", fps);
+	for (char *p = buf; *p; p++) {
+		const uint8_t *g = vgafont16 + (uint8_t) *p * 16;
+		for (int row = 0; row < 16; row++)
+			for (int col = 0; col < 8; col++)
+				if (g[row] & (0x80 >> col)) {
+					fps_px(s, x0 + col + 1, y0 + row + 1,
+					       0x0000);
+					fps_px(s, x0 + col, y0 + row, 0xFFFF);
+				}
+		x0 += 8;
+	}
+}
+#endif
+
 #ifdef LCD_FILL_DIRECT
 void lcd_fill_frame(void *src, int cx, int cy, int cw, int ch);
 #endif
@@ -220,6 +252,21 @@ static void redraw(void *opaque,
 	vga_get_content_rect(s->pc->vga, &cx, &cy, &cw, &ch);
 	fill = cw > 0 && ch > 0 &&
 		(cx != 0 || cy != 0 || cw != LCD_WIDTH || ch != LCD_HEIGHT);
+#endif
+#ifdef LCD_FPS_OVERLAY
+	static int ov_fps, ov_frames, ov_last;
+	int nowv = get_uticks();
+	if (!ov_last)
+		ov_last = nowv;
+	ov_frames++;
+	if (nowv - ov_last >= 1000000) {
+		ov_fps = (int) ((long long) ov_frames * 1000000 /
+				(nowv - ov_last));
+		ov_frames = 0;
+		ov_last = nowv;
+	}
+	if (fill)
+		draw_fps_overlay(s, cx, cy, ov_fps);
 #endif
 #ifdef LCD_FILL_DIRECT
 	if (fill) {

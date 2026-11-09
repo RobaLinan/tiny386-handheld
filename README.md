@@ -198,6 +198,8 @@ P4-specific notes:
   panel with the PPA scaler. The PPA scale step is 1/16, so the 640→800 stretch
   is 1.1875 (475 of 480 columns), leaving a few black columns at the right edge.
 - The SD card holds `bios.bin`, `vgabios.bin`, `tiny386.ini` and the disk images.
+- A small `N FPS` counter is drawn in the top-left corner of the picture
+  (LCD_FPS_OVERLAY), updated once per second.
 - In game, a vertical swipe on the right half of the screen changes the volume
   by 10% per swipe (up = louder); the left half does the same for the backlight
   (10-100%). No on-screen indicator. Default volume is 50%.

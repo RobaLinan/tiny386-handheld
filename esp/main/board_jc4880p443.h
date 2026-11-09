@@ -12,6 +12,7 @@
 #define LCD_FILL_DIRECT
 #define LCD_NO_BAND_DELAY
 #define LCD_FPS_LOG
+#define LCD_FPS_OVERLAY
 #define BOOT_MENU
 
 // XXX: ld reports "error: Total discarded sections size is X bytes"
