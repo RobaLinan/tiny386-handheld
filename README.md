@@ -199,9 +199,12 @@ P4-specific notes:
   is 1.1875 (475 of 480 columns), leaving a few black columns at the right edge.
 - The SD card holds `bios.bin`, `vgabios.bin`, `tiny386.ini` and the disk images.
 - Serial keyboard: type into `idf.py monitor`. DOS has a 15-character keyboard
-  buffer, so enter `D:\PAL\PLAYN` rather than the full `PLAYN.BAT` name.
-  Injected keys are held down for 80 ms before the break is sent; games that
-  watch a make/break flag instead of polling the BIOS buffer (PAL) need this.
+  buffer, so enter `D:\PAL.BAT` rather than a longer path. Injected keys are held
+  down for 80 ms before the break is sent; games that watch a make/break flag
+  instead of polling the BIOS buffer (PAL) need this.
+- Touch boot menu (GT911 on I2C0, SDA 7/SCL 8): choose PAL, FD2 or the DOS
+  prompt. Once DOS shows `C:\>`, the firmware types `D:\PAL.BAT` or `D:\FD2`
+  for the selected game. Those batch files live on the games disk image.
 
 `esp/main/fb_dos.img` (a built-in bootable DOS disk used by some S3 boards) is not
 distributed with this repository; without it those boards build with SD-only boot.

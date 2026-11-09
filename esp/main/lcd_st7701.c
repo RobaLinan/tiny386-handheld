@@ -273,6 +273,11 @@ void lcd_fill_frame(void *src, int cx, int cy, int cw, int ch)
 }
 #endif
 
+#ifdef BOOT_MENU
+extern int boot_choice;
+int boot_menu(esp_lcd_panel_handle_t panel);
+#endif
+
 void vga_task(void *arg)
 {
 	int core_id = esp_cpu_get_core_id();
@@ -363,6 +368,9 @@ void vga_task(void *arg)
 	bsp_display_brightness_set(30);
 #ifdef LCD_FILL_DIRECT
 	lcd_fill_init(panel);
+#endif
+#ifdef BOOT_MENU
+	boot_choice = boot_menu(panel);
 #endif
 
 	globals.panel = panel;

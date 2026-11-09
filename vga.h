@@ -20,6 +20,7 @@ void vga_refresh(VGAState *s,
 /* On-screen rectangle of the last rendered picture, in framebuffer
  * (logical) pixels. w/h are 0 before the first refresh. */
 void vga_get_content_rect(VGAState *s, int *x, int *y, int *w, int *h);
+int vga_is_text_mode(VGAState *s);
 
 void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val);
 uint32_t vga_ioport_read(VGAState *s, uint32_t addr);

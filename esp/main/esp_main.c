@@ -28,6 +28,7 @@
 
 #include "../../ini.h"
 #include "../../pc.h"
+#include "../../i8042.h"
 #include "common.h"
 
 //
@@ -284,6 +285,106 @@ static void redraw(void *opaque,
 #endif
 }
 
+#ifdef BOOT_MENU
+extern int boot_choice;
+
+struct boot_key {
+	char ch;
+	unsigned char scan;
+	unsigned char shift;
+};
+
+static const struct boot_key boot_keys[] = {
+	{' ', 0x39, 0}, {'.', 0x34, 0}, {'2', 0x03, 0}, {':', 0x27, 1},
+	{'\\', 0x2B, 0}, {'A', 0x1E, 0}, {'B', 0x30, 0}, {'D', 0x20, 0},
+	{'F', 0x21, 0}, {'L', 0x26, 0}, {'N', 0x31, 0}, {'P', 0x19, 0},
+	{'T', 0x14, 0}, {'Y', 0x15, 0}, {'\r', 0x1C, 0},
+};
+
+static int boot_key_scan(char c, int *shift)
+{
+	for (int i = 0; i < (int)(sizeof(boot_keys) / sizeof(boot_keys[0])); i++) {
+		if (boot_keys[i].ch == c) {
+			*shift = boot_keys[i].shift;
+			return boot_keys[i].scan;
+		}
+	}
+	return 0;
+}
+
+static int dos_prompt_visible(PC *pc)
+{
+	char line[81];
+
+	if (!pc->vga || !vga_is_text_mode(pc->vga))
+		return 0;
+	for (int r = 0; r < 25; r++) {
+		for (int c = 0; c < 80; c++)
+			line[c] = vga_mem_read(pc->vga,
+					       0xB8000 + (r * 80 + c) * 2);
+		line[80] = 0;
+		if (strstr(line, "C:\\>"))
+			return 1;
+	}
+	return 0;
+}
+
+/* Type the selected game's command once DOS shows its prompt. */
+static void boot_autolaunch(PC *pc)
+{
+	static const char *cmd;
+	static int started, done, pos, held, held_shift;
+	static uint32_t t, next_scan;
+	uint32_t now = get_uticks();
+
+	if (done || boot_choice > 1)
+		return;
+	if (!started) {
+		if (now < next_scan)
+			return;
+		next_scan = now + 200000;
+		if (!dos_prompt_visible(pc))
+			return;
+		cmd = boot_choice == 0 ? "D:\\PAL.BAT\r" : "D:\\FD2\r";
+		fprintf(stderr, "autolaunch: prompt found, typing %s\n", cmd);
+		started = 1;
+		pos = 0;
+		t = now;
+		return;
+	}
+	if (held) {
+		if (now - t >= 60000) {
+			ps2_put_keycode(pc->kbd, 0, held);
+			if (held_shift)
+				ps2_put_keycode(pc->kbd, 0, 0x2A);
+			held = 0;
+			t = now;
+		}
+		return;
+	}
+	if (now - t < 30000)
+		return;
+	if (!cmd[pos]) {
+		fprintf(stderr, "autolaunch: done\n");
+		done = 1;
+		return;
+	}
+	int shift = 0;
+	int scan = boot_key_scan(cmd[pos], &shift);
+	pos++;
+	if (!scan) {
+		t = now;
+		return;
+	}
+	if (shift)
+		ps2_put_keycode(pc->kbd, 1, 0x2A);
+	ps2_put_keycode(pc->kbd, 1, scan);
+	held = scan;
+	held_shift = shift;
+	t = now;
+}
+#endif
+
 static int pc_main(const char *file)
 {
 	PCConfig conf;
@@ -334,8 +435,12 @@ static int pc_main(const char *file)
 	load_bios_and_reset(pc);
 
 	pc->boot_start_time = get_uticks();
-	for (; pc->shutdown_state != 8;)
+	for (; pc->shutdown_state != 8;) {
 		pc_step(pc);
+#ifdef BOOT_MENU
+		boot_autolaunch(pc);
+#endif
+	}
 	return 0;
 }
 
@@ -664,6 +769,6 @@ void app_main(void)
 
 	if (psram) {
 		xTaskCreatePinnedToCore(i386_task, "i386_main", 8192, &config, 3, NULL, 1);
-		xTaskCreatePinnedToCore(vga_task, "vga_task", 4096, NULL, 0, NULL, 0);
+		xTaskCreatePinnedToCore(vga_task, "vga_task", 8192, NULL, 0, NULL, 0);
 	}
 }

@@ -1520,6 +1520,11 @@ void vga_get_content_rect(VGAState *s, int *x, int *y, int *w, int *h)
     *h = s->content_h;
 }
 
+int vga_is_text_mode(VGAState *s)
+{
+    return s->graphic_mode == 1;
+}
+
 int vga_step(VGAState *s)
 {
     uint32_t now = get_uticks();

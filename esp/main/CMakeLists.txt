@@ -35,6 +35,7 @@ idf_component_register(SRCS "esp_main.c"
 "storage.c"
 "usb_hid.c"
 "usb_input.c"
+"boot_menu.c"
 INCLUDE_DIRS "")
 
 target_add_binary_data(${COMPONENT_LIB} "fb_bios.bin" BINARY)
