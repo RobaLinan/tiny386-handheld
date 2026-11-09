@@ -205,8 +205,24 @@ P4-specific notes:
 - Touch boot menu (GT911 on I2C0, SDA 7/SCL 8): choose PAL or FD2. Once DOS
   shows `C:\>`, the firmware types `D:\PAL.BAT` or `D:\FD2` for the selected
   game. Those batch files live on the games disk image.
-- Menu entries live in the `games[]` table in `esp/main/boot_menu.c` (title,
-  launch command, thumbnail). Each card shows the title above a scaled
+- The game list comes from `/sdcard/menu.ini` (built-in PAL/FD2 entries are
+  used when the file is missing):
+
+  ```ini
+  [game1]
+  title = PAL
+  cmd = D:\PAL.BAT
+  thumb = /sdcard/menu/pal_thumb.raw
+
+  [game2]
+  title = FD2
+  cmd = D:\FD2
+  thumb = /sdcard/menu/fd2_thumb.raw
+  ```
+
+  `cmd` is typed once DOS shows its prompt (Enter is appended). Adding a game
+  needs one `[gameN]` block plus a thumbnail; no firmware change.
+- Each card shows the title over a scaled thumbnail. Each card shows the title above a scaled
   thumbnail; the cards scroll horizontally with drag, fling and snap. The
   strip is pre-rendered in PSRAM once, so a scroll frame is a single DMA
   blit and stays smooth with many games. Put a 380x214 RGB565 thumbnail at

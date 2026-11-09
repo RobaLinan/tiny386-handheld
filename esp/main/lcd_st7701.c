@@ -383,6 +383,11 @@ void vga_task(void *arg)
 #endif
 #ifdef BOOT_MENU
 	boot_choice = boot_menu(panel);
+	/* Drop any menu leftovers so nothing blinks through the first frames. */
+#ifdef LCD_FILL_DIRECT
+	memset(fill_fb[0], 0, LCD_HEIGHT * LCD_WIDTH * 2);
+	memset(fill_fb[1], 0, LCD_HEIGHT * LCD_WIDTH * 2);
+#endif
 #endif
 
 	globals.panel = panel;

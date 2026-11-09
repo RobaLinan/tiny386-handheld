@@ -16,41 +16,36 @@
 #include "esp_timer.h"
 
 #include "common.h"
+#include "../../ini.h"
 
 extern const uint8_t vgafont16[256 * 16];
 
-/* Add a game here plus a 380x214 thumbnail on the SD card
- * (scripts/menu_bg.py writes it). `cmd` is typed once DOS shows its
- * prompt. */
+/* Games come from /sdcard/menu.ini:
+ *
+ *   [game1]
+ *   title = PAL
+ *   cmd = D:\PAL.BAT
+ *   thumb = /sdcard/menu/pal_thumb.raw
+ *
+ * `cmd` is typed once DOS shows its prompt (Enter is appended). Missing
+ * file = the two built-in entries below. */
+#define MAX_GAMES 16
+
 struct game_entry {
-	const char *title;
-	const char *cmd;
-	const char *thumb;
+	char title[32];
+	char cmd[96];
+	char thumb[96];
 };
 
-static const struct game_entry games[] = {
-	{ "PAL", "D:\\PAL.BAT\r", "/sdcard/menu/pal_thumb.raw" },
-	{ "FD2", "D:\\FD2\r", "/sdcard/menu/fd2_thumb.raw" },
-};
-
-#define NGAMES ((int) (sizeof(games) / sizeof(games[0])))
-
-/* Bigger values = smoother dragging but more CPU in the blit. */
-#define CARD_W 320
-#define CARD_H 250
-#define CARD_GAP 16
-#define STRIP_Y (LCD_HEIGHT - 12 - CARD_H)
-#define STRIP_H CARD_H
-#define TITLE_H 40
-#define THUMB_W 380
-#define THUMB_H 214
+static struct game_entry games[MAX_GAMES];
+static int ngames;
 
 /* Selected entry; read by pc_main(). */
 int boot_choice = 0;
 
 const char *boot_menu_cmd(int idx)
 {
-	return (idx >= 0 && idx < NGAMES) ? games[idx].cmd : NULL;
+	return (idx >= 0 && idx < ngames) ? games[idx].cmd : NULL;
 }
 
 static const char *TAG = "bootmenu";
@@ -59,15 +54,92 @@ static esp_lcd_panel_handle_t menu_panel;
 static uint16_t *menu_fb;    /* full menu screen, transposed */
 static uint16_t *strip;      /* pre-rendered card strip, transposed */
 static uint16_t *staging;    /* aligned copy of the visible strip window */
-static uint16_t *thumbs[NGAMES];
+static uint16_t *thumbs[MAX_GAMES];
 static int strip_w;          /* strip width in logical x */
 static int max_scroll;
 static int scroll;
 
 #define MENU_W LCD_WIDTH    /* 800 */
 #define MENU_H LCD_HEIGHT   /* 480 */
+#define CARD_W 320
+#define CARD_H 250
+#define CARD_GAP 16
+#define STRIP_Y (MENU_H - 12 - CARD_H)
+#define STRIP_H CARD_H
+#define TITLE_H 40
+#define THUMB_W 380
+#define THUMB_H 214
 #define THUMB_BYTES ((size_t) THUMB_W * THUMB_H * 2)
 #define WINDOW_PX ((size_t) MENU_W * STRIP_H)
+
+static void add_cmd_enter(struct game_entry *g)
+{
+	size_t n = strlen(g->cmd);
+
+	if (n && n + 1 < sizeof(g->cmd)) {
+		g->cmd[n] = '\r';
+		g->cmd[n + 1] = 0;
+	}
+}
+
+static int menu_ini_handler(void *user, const char *section, const char *name,
+			    const char *value)
+{
+	int idx = -1;
+
+	(void) user;
+	if (sscanf(section, "game%d", &idx) != 1 || idx < 1 ||
+	    idx > MAX_GAMES)
+		return 1;
+	struct game_entry *g = &games[idx - 1];
+	if (!strcmp(name, "title"))
+		snprintf(g->title, sizeof(g->title), "%s", value);
+	else if (!strcmp(name, "cmd"))
+		snprintf(g->cmd, sizeof(g->cmd), "%s", value);
+	else if (!strcmp(name, "thumb"))
+		snprintf(g->thumb, sizeof(g->thumb), "%s", value);
+	return 1;
+}
+
+static void add_default(int *n, const char *title, const char *cmd,
+			const char *thumb)
+{
+	struct game_entry *g = &games[(*n)++];
+
+	snprintf(g->title, sizeof(g->title), "%s", title);
+	snprintf(g->cmd, sizeof(g->cmd), "%s", cmd);
+	snprintf(g->thumb, sizeof(g->thumb), "%s", thumb);
+}
+
+static void load_games(void)
+{
+	int parsed = ini_parse("/sdcard/menu.ini", menu_ini_handler, NULL);
+	int n = 0;
+
+	if (parsed == 0) {
+		for (int i = 0; i < MAX_GAMES; i++) {
+			if (!games[i].title[0])
+				continue;
+			if (n != i)
+				games[n] = games[i];
+			add_cmd_enter(&games[n]);
+			n++;
+		}
+	}
+	if (n == 0) {
+		ESP_LOGW(TAG, "/sdcard/menu.ini missing or empty, defaults");
+		add_default(&n, "PAL", "D:\\PAL.BAT",
+			    "/sdcard/menu/pal_thumb.raw");
+		add_default(&n, "FD2", "D:\\FD2",
+			    "/sdcard/menu/fd2_thumb.raw");
+		for (int i = 0; i < n; i++)
+			add_cmd_enter(&games[i]);
+	}
+	ngames = n;
+	for (int i = 0; i < ngames; i++)
+		ESP_LOGI(TAG, "game %d: %s -> %s", i + 1, games[i].title,
+			 games[i].cmd);
+}
 
 /* Logical (x, y) lives at x * height + y in a transposed buffer. */
 static inline void put_px(uint16_t *buf, int h, int x, int y, uint16_t c)
@@ -120,14 +192,14 @@ static void dim_rect(int x0, int y0, int x1, int y1)
 
 static int card_x(int i)
 {
-	int content = NGAMES * CARD_W + (NGAMES - 1) * CARD_GAP;
+	int content = ngames * CARD_W + (ngames - 1) * CARD_GAP;
 	int margin = content >= MENU_W ? 24 : (MENU_W - content) / 2;
 	return margin + i * (CARD_W + CARD_GAP);
 }
 
 static void load_thumbs(void)
 {
-	for (int i = 0; i < NGAMES; i++) {
+	for (int i = 0; i < ngames; i++) {
 		thumbs[i] = heap_caps_aligned_alloc(128, THUMB_BYTES,
 						    MALLOC_CAP_SPIRAM |
 						    MALLOC_CAP_8BIT);
@@ -164,7 +236,7 @@ static void draw_thumb(uint16_t *buf, int h, int i, int x0, int y0, int w,
 
 static void build_strip(void)
 {
-	int content = NGAMES * CARD_W + (NGAMES - 1) * CARD_GAP;
+	int content = ngames * CARD_W + (ngames - 1) * CARD_GAP;
 	int margin = content >= MENU_W ? 24 : (MENU_W - content) / 2;
 
 	strip_w = content + margin * 2;
@@ -180,7 +252,7 @@ static void build_strip(void)
 	assert(strip && staging);
 	fill_buf_rect(strip, STRIP_H, 0, 0, strip_w, STRIP_H, 0x0861);
 
-	for (int i = 0; i < NGAMES; i++) {
+	for (int i = 0; i < ngames; i++) {
 		int x0 = card_x(i);
 		int tw = (int) strlen(games[i].title) * 8 * 2;
 		uint16_t border = 0x7BEF;
@@ -245,7 +317,7 @@ static int nearest_card(void)
 {
 	int best = 0, bestd = 0x7fffffff;
 
-	for (int i = 0; i < NGAMES; i++) {
+	for (int i = 0; i < ngames; i++) {
 		int d = snap_target(i) - scroll;
 		if (d < 0)
 			d = -d;
@@ -282,7 +354,7 @@ static int card_at(int lx)
 {
 	int sx = scroll + lx;
 
-	for (int i = 0; i < NGAMES; i++) {
+	for (int i = 0; i < ngames; i++) {
 		int x0 = card_x(i);
 		if (sx >= x0 && sx < x0 + CARD_W)
 			return i;
@@ -335,10 +407,11 @@ int boot_menu(esp_lcd_panel_handle_t panel)
 		ESP_LOGE(TAG, "GT911 init failed, booting the first game");
 		return 0;
 	}
+	load_games();
 	load_thumbs();
 	build_strip();
 	draw_background();
-	ESP_LOGI(TAG, "menu ready (%d games, strip %d)", NGAMES, strip_w);
+	ESP_LOGI(TAG, "menu ready (%d games, strip %d)", ngames, strip_w);
 	stage_strip();
 
 	int active = 0, start_x = 0, start_scroll = 0, last_x = 0, last_y = 0;
@@ -395,9 +468,8 @@ int boot_menu(esp_lcd_panel_handle_t panel)
 			int idx = nearest_card();
 			if (moved && abs(last_x - start_x) > 80) {
 				int s = scroll + dir * (CARD_W + CARD_GAP);
-				idx = 0;
 				int best = 0x7fffffff;
-				for (int i = 0; i < NGAMES; i++) {
+				for (int i = 0; i < ngames; i++) {
 					int d = abs(snap_target(i) - s);
 					if (d < best) {
 						best = d;
