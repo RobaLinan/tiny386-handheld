@@ -206,10 +206,13 @@ P4-specific notes:
   shows `C:\>`, the firmware types `D:\PAL.BAT` or `D:\FD2` for the selected
   game. Those batch files live on the games disk image.
 - Menu entries live in the `games[]` table in `esp/main/boot_menu.c` (title,
-  launch command, background, thumbnail). `scripts/menu_bg.py <image>
-  <out.raw>` writes an 800x480 RGB565 background and a 380x214 thumbnail;
-  copy both to `/sdcard/menu/`. Each card shows the title above the scaled
-  thumbnail. Missing files fall back to a solid background.
+  launch command, thumbnail). Each card shows the title above a scaled
+  thumbnail; the cards scroll horizontally with drag, fling and snap. The
+  strip is pre-rendered in PSRAM once, so a scroll frame is a single DMA
+  blit and stays smooth with many games. Put a 380x214 RGB565 thumbnail at
+  `/sdcard/menu/<name>_thumb.raw`, written by `scripts/menu_bg.py <image>
+  <out.raw>` (the script also writes a full 800x480 background, unused by
+  the scrolling menu).
 
 `esp/main/fb_dos.img` (a built-in bootable DOS disk used by some S3 boards) is not
 distributed with this repository; without it those boards build with SD-only boot.

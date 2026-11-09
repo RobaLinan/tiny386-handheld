@@ -1,6 +1,7 @@
 #ifdef BOOT_MENU
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -12,34 +13,37 @@
 #include "esp_lcd_touch_gt911.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "common.h"
 
 extern const uint8_t vgafont16[256 * 16];
 
-/* Add a game here plus a 800x480 background and a 380x214 thumbnail on
- * the SD card (scripts/menu_bg.py writes both). `cmd` is typed once DOS
- * shows its prompt. */
+/* Add a game here plus a 380x214 thumbnail on the SD card
+ * (scripts/menu_bg.py writes it). `cmd` is typed once DOS shows its
+ * prompt. */
 struct game_entry {
 	const char *title;
 	const char *cmd;
-	const char *bg;
 	const char *thumb;
 };
 
 static const struct game_entry games[] = {
-	{ "PAL", "D:\\PAL.BAT\r", "/sdcard/menu/pal.raw",
-	  "/sdcard/menu/pal_thumb.raw" },
-	{ "FD2", "D:\\FD2\r", "/sdcard/menu/fd2.raw",
-	  "/sdcard/menu/fd2_thumb.raw" },
+	{ "PAL", "D:\\PAL.BAT\r", "/sdcard/menu/pal_thumb.raw" },
+	{ "FD2", "D:\\FD2\r", "/sdcard/menu/fd2_thumb.raw" },
 };
 
 #define NGAMES ((int) (sizeof(games) / sizeof(games[0])))
-#define MENU_COLS 3
+
+/* Bigger values = smoother dragging but more CPU in the blit. */
+#define CARD_W 320
+#define CARD_H 250
+#define CARD_GAP 16
+#define STRIP_Y (LCD_HEIGHT - 12 - CARD_H)
+#define STRIP_H CARD_H
+#define TITLE_H 40
 #define THUMB_W 380
 #define THUMB_H 214
-#define CARD_H 250
-#define TITLE_H 40
 
 /* Selected entry; read by pc_main(). */
 int boot_choice = 0;
@@ -52,29 +56,59 @@ const char *boot_menu_cmd(int idx)
 static const char *TAG = "bootmenu";
 static esp_lcd_touch_handle_t tp;
 static esp_lcd_panel_handle_t menu_panel;
-static uint16_t *menu_fb;
+static uint16_t *menu_fb;    /* full menu screen, transposed */
+static uint16_t *strip;      /* pre-rendered card strip, transposed */
+static uint16_t *staging;    /* aligned copy of the visible strip window */
 static uint16_t *thumbs[NGAMES];
+static int strip_w;          /* strip width in logical x */
+static int max_scroll;
+static int scroll;
 
-#define MENU_W LCD_WIDTH    /* 800, logical x */
-#define MENU_H LCD_HEIGHT   /* 480, logical y */
-#define BG_BYTES ((size_t) MENU_W * MENU_H * 2)
+#define MENU_W LCD_WIDTH    /* 800 */
+#define MENU_H LCD_HEIGHT   /* 480 */
 #define THUMB_BYTES ((size_t) THUMB_W * THUMB_H * 2)
+#define WINDOW_PX ((size_t) MENU_W * STRIP_H)
 
-/* The panel scans portrait: logical (x, y) lives at x * MENU_H + y. */
-static inline void put_px(int x, int y, uint16_t c)
+/* Logical (x, y) lives at x * height + y in a transposed buffer. */
+static inline void put_px(uint16_t *buf, int h, int x, int y, uint16_t c)
 {
-	if (x >= 0 && x < MENU_W && y >= 0 && y < MENU_H)
-		menu_fb[x * MENU_H + y] = c;
+	buf[x * h + y] = c;
 }
 
-static void fill_rect(int x0, int y0, int x1, int y1, uint16_t c)
+static void fill_buf_rect(uint16_t *buf, int h, int x0, int y0, int x1,
+			  int y1, uint16_t c)
 {
 	for (int x = x0; x < x1; x++)
 		for (int y = y0; y < y1; y++)
-			put_px(x, y, c);
+			put_px(buf, h, x, y, c);
 }
 
-/* Halve the brightness of a rectangle, leaving translucent-looking bars. */
+static void draw_text(uint16_t *buf, int h, int x, int y, const char *s,
+		      int scale, uint16_t c)
+{
+	for (; *s; s++) {
+		const uint8_t *glyph = vgafont16 + (uint8_t) *s * 16;
+		for (int row = 0; row < 16; row++) {
+			uint8_t bits = glyph[row];
+			for (int col = 0; col < 8; col++)
+				if (bits & (0x80 >> col))
+					fill_buf_rect(buf, h, x + col * scale,
+						      y + row * scale,
+						      x + (col + 1) * scale,
+						      y + (row + 1) * scale, c);
+		}
+		x += 8 * scale;
+	}
+}
+
+static void draw_text_shadow(uint16_t *buf, int h, int x, int y,
+			     const char *s, int scale, uint16_t c)
+{
+	draw_text(buf, h, x + 2, y + 2, s, scale, 0x0000);
+	draw_text(buf, h, x, y, s, scale, c);
+}
+
+/* Halve the brightness of a rectangle, leaving a translucent-looking bar. */
 static void dim_rect(int x0, int y0, int x1, int y1)
 {
 	for (int x = x0; x < x1; x++)
@@ -84,55 +118,19 @@ static void dim_rect(int x0, int y0, int x1, int y1)
 		}
 }
 
-static void draw_text(int x, int y, const char *s, int scale, uint16_t c)
+static int card_x(int i)
 {
-	for (; *s; s++) {
-		const uint8_t *glyph = vgafont16 + (uint8_t) *s * 16;
-		for (int row = 0; row < 16; row++) {
-			uint8_t bits = glyph[row];
-			for (int col = 0; col < 8; col++)
-				if (bits & (0x80 >> col))
-					fill_rect(x + col * scale,
-						  y + row * scale,
-						  x + (col + 1) * scale,
-						  y + (row + 1) * scale, c);
-		}
-		x += 8 * scale;
-	}
-}
-
-static void draw_text_shadow(int x, int y, const char *s, int scale,
-			     uint16_t c)
-{
-	draw_text(x + 2, y + 2, s, scale, 0x0000);
-	draw_text(x, y, s, scale, c);
-}
-
-static void flip(void)
-{
-	esp_lcd_panel_draw_bitmap(menu_panel, 0, 0, MENU_H, MENU_W, menu_fb);
-}
-
-static void load_bg(int idx)
-{
-	FILE *f = fopen(games[idx].bg, "rb");
-	size_t got = 0;
-
-	if (f) {
-		got = fread(menu_fb, 1, BG_BYTES, f);
-		fclose(f);
-	}
-	if (got != BG_BYTES) {
-		ESP_LOGW(TAG, "%s missing, solid background", games[idx].bg);
-		fill_rect(0, 0, MENU_W, MENU_H, 0x0841);
-	}
+	int content = NGAMES * CARD_W + (NGAMES - 1) * CARD_GAP;
+	int margin = content >= MENU_W ? 24 : (MENU_W - content) / 2;
+	return margin + i * (CARD_W + CARD_GAP);
 }
 
 static void load_thumbs(void)
 {
 	for (int i = 0; i < NGAMES; i++) {
-		thumbs[i] = heap_caps_malloc(THUMB_BYTES,
-					     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+		thumbs[i] = heap_caps_aligned_alloc(128, THUMB_BYTES,
+						    MALLOC_CAP_SPIRAM |
+						    MALLOC_CAP_8BIT);
 		if (!thumbs[i])
 			continue;
 		memset(thumbs[i], 0, THUMB_BYTES);
@@ -146,66 +144,150 @@ static void load_thumbs(void)
 	}
 }
 
-/* Scale the cached thumbnail (transposed layout) into a card. */
-static void draw_thumb(int idx, int x0, int y0, int w, int h)
+/* Draw a thumbnail, scaling the cached 380x214 image into the card. */
+static void draw_thumb(uint16_t *buf, int h, int i, int x0, int y0, int w,
+		       int hh)
 {
-	const uint16_t *src = thumbs[idx];
+	const uint16_t *src = thumbs[i];
 
 	if (!src)
 		return;
-	for (int dy = 0; dy < h; dy++) {
-		int sy = dy * THUMB_H / h;
+	for (int dy = 0; dy < hh; dy++) {
+		int sy = dy * THUMB_H / hh;
 		for (int dx = 0; dx < w; dx++) {
 			int sx = dx * THUMB_W / w;
-			put_px(x0 + dx, y0 + dy, src[sx * THUMB_H + sy]);
+			put_px(buf, h, x0 + dx, y0 + dy,
+			       src[sx * THUMB_H + sy]);
 		}
 	}
 }
 
-static void card_rect(int i, int *x0, int *y0, int *x1, int *y1)
+static void build_strip(void)
 {
-	int cols = NGAMES < MENU_COLS ? NGAMES : MENU_COLS;
-	int col = i % cols, row = i / cols;
-	int margin = 12, gap = 12;
-	int bw = (MENU_W - margin * 2 - gap * (cols - 1)) / cols;
-	int total = cols * bw + gap * (cols - 1);
-	int left = (MENU_W - total) / 2;
+	int content = NGAMES * CARD_W + (NGAMES - 1) * CARD_GAP;
+	int margin = content >= MENU_W ? 24 : (MENU_W - content) / 2;
 
-	*x0 = left + col * (bw + gap);
-	*x1 = *x0 + bw;
-	*y0 = MENU_H - margin - CARD_H + row * (CARD_H + gap);
-	*y1 = *y0 + CARD_H;
+	strip_w = content + margin * 2;
+	if (strip_w < MENU_W)
+		strip_w = MENU_W;
+	max_scroll = strip_w - MENU_W;
+
+	strip = heap_caps_aligned_alloc(128,
+					(size_t) strip_w * STRIP_H * 2,
+					MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+	staging = heap_caps_aligned_alloc(128, WINDOW_PX * 2,
+					  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+	assert(strip && staging);
+	fill_buf_rect(strip, STRIP_H, 0, 0, strip_w, STRIP_H, 0x0861);
+
+	for (int i = 0; i < NGAMES; i++) {
+		int x0 = card_x(i);
+		int tw = (int) strlen(games[i].title) * 8 * 2;
+		uint16_t border = 0x7BEF;
+
+		fill_buf_rect(strip, STRIP_H, x0 + 2, 2, x0 + CARD_W - 2,
+			      CARD_H - 2, 0x10A2);
+		fill_buf_rect(strip, STRIP_H, x0, 0, x0 + CARD_W, 3, border);
+		fill_buf_rect(strip, STRIP_H, x0, CARD_H - 3, x0 + CARD_W,
+			      CARD_H, border);
+		fill_buf_rect(strip, STRIP_H, x0, 0, x0 + 3, CARD_H, border);
+		fill_buf_rect(strip, STRIP_H, x0 + CARD_W - 3, 0, x0 + CARD_W,
+			      CARD_H, border);
+		draw_text_shadow(strip, STRIP_H, x0 + (CARD_W - tw) / 2, 8,
+				 games[i].title, 2, 0xFFFF);
+		draw_thumb(strip, STRIP_H, i, x0 + 4, TITLE_H, CARD_W - 8,
+			   CARD_H - TITLE_H - 4);
+	}
 }
 
-static void draw_card(int i, int selected)
+static void stage_strip(void)
 {
-	int x0, y0, x1, y1;
+	int s = scroll;
 
-	card_rect(i, &x0, &y0, &x1, &y1);
-	uint16_t border = selected ? 0x07E0 : 0x7BEF;
-	uint16_t fg = selected ? 0x07E0 : 0xFFFF;
-	int tw = (int) strlen(games[i].title) * 8 * 2;
-
-	fill_rect(x0 + 2, y0 + 2, x1 - 2, y1 - 2, 0x10A2);
-	fill_rect(x0, y0, x1, y0 + 3, border);
-	fill_rect(x0, y1 - 3, x1, y1, border);
-	fill_rect(x0, y0, x0 + 3, y1, border);
-	fill_rect(x1 - 3, y0, x1, y1, border);
-	draw_text_shadow(x0 + (x1 - x0 - tw) / 2, y0 + 8, games[i].title, 2,
-			 fg);
-	draw_thumb(i, x0 + 4, y0 + TITLE_H, (x1 - x0) - 8,
-		   (y1 - y0) - TITLE_H - 4);
+	if (s < 0)
+		s = 0;
+	if (s > max_scroll)
+		s = max_scroll;
+	memcpy(staging, strip + (size_t) s * STRIP_H, WINDOW_PX * 2);
+	esp_lcd_panel_draw_bitmap(menu_panel, STRIP_Y, 0, STRIP_Y + STRIP_H,
+				  MENU_W, staging);
 }
 
-static void draw_menu(int selected)
+static void draw_background(void)
 {
-	load_bg(selected);
-	dim_rect(0, 0, MENU_W, 40);
-	dim_rect(0, MENU_H - CARD_H - 24, MENU_W, MENU_H);
-	draw_text_shadow(16, 10, "TINY386", 2, 0xFFFF);
-	for (int i = 0; i < NGAMES; i++)
-		draw_card(i, i == selected);
-	flip();
+	/* vertical gradient from deep blue to black */
+	for (int x = 0; x < MENU_W; x++) {
+		for (int y = 0; y < MENU_H; y++) {
+			int v = 8 + y / 24;
+			uint16_t c = (uint16_t) (v << 11) | (v << 6) | (v / 2);
+			menu_fb[x * MENU_H + y] = c;
+		}
+	}
+	draw_text_shadow(menu_fb, MENU_H, 16, 10, "TINY386", 2, 0xFFFF);
+	draw_text(menu_fb, MENU_H, 16, 60,
+		  "swipe to browse, tap to play", 1, 0xA514);
+	dim_rect(0, STRIP_Y - 8, MENU_W, STRIP_Y);
+	esp_lcd_panel_draw_bitmap(menu_panel, 0, 0, MENU_H, MENU_W, menu_fb);
+}
+
+static int snap_target(int idx)
+{
+	int t = card_x(idx) + CARD_W / 2 - MENU_W / 2;
+
+	if (t < 0)
+		t = 0;
+	if (t > max_scroll)
+		t = max_scroll;
+	return t;
+}
+
+static int nearest_card(void)
+{
+	int best = 0, bestd = 0x7fffffff;
+
+	for (int i = 0; i < NGAMES; i++) {
+		int d = snap_target(i) - scroll;
+		if (d < 0)
+			d = -d;
+		if (d < bestd) {
+			bestd = d;
+			best = i;
+		}
+	}
+	return best;
+}
+
+/* Ease-out animation to a scroll position. */
+static void animate_to(int target)
+{
+	int start = scroll;
+	int64_t t0 = esp_timer_get_time();
+
+	for (;;) {
+		int64_t dt = esp_timer_get_time() - t0;
+		if (dt >= 220000) {
+			scroll = target;
+			stage_strip();
+			return;
+		}
+		float k = (float) dt / 220000.0f;
+		k = 1.0f - (1.0f - k) * (1.0f - k);
+		scroll = start + (int) ((target - start) * k);
+		stage_strip();
+		vTaskDelay(pdMS_TO_TICKS(10));
+	}
+}
+
+static int card_at(int lx)
+{
+	int sx = scroll + lx;
+
+	for (int i = 0; i < NGAMES; i++) {
+		int x0 = card_x(i);
+		if (sx >= x0 && sx < x0 + CARD_W)
+			return i;
+	}
+	return -1;
 }
 
 static esp_err_t touch_init(void)
@@ -254,32 +336,78 @@ int boot_menu(esp_lcd_panel_handle_t panel)
 		return 0;
 	}
 	load_thumbs();
+	build_strip();
+	draw_background();
+	ESP_LOGI(TAG, "menu ready (%d games, strip %d)", NGAMES, strip_w);
+	stage_strip();
 
-	ESP_LOGI(TAG, "menu ready");
-	draw_menu(0);
-	vTaskDelay(pdMS_TO_TICKS(100));
+	int active = 0, start_x = 0, start_scroll = 0, last_x = 0, last_y = 0;
+	int moved = 0;
+	int64_t start_t = 0;
 
 	for (;;) {
 		uint16_t rx = 0, ry = 0, strength[1];
 		uint8_t cnt = 0;
+		int lx, ly;
+
 		esp_lcd_touch_read_data(tp);
-		if (esp_lcd_touch_get_coordinates(tp, &rx, &ry, strength, &cnt,
-						  1) && cnt) {
-			int x, y;
-			touch_to_menu(rx, ry, &x, &y);
-			fprintf(stderr, "menu: touch %d,%d -> %d,%d\n",
-				rx, ry, x, y);
-			for (int i = 0; i < NGAMES; i++) {
-				int x0, y0, x1, y1;
-				card_rect(i, &x0, &y0, &x1, &y1);
-				if (x >= x0 && x < x1 && y >= y0 && y < y1) {
-					draw_menu(i);
-					vTaskDelay(pdMS_TO_TICKS(250));
-					return i;
+		int down = esp_lcd_touch_get_coordinates(tp, &rx, &ry, strength,
+							 &cnt, 1) && cnt;
+		touch_to_menu(rx, ry, &lx, &ly);
+
+		if (down && !active) {
+			active = 1;
+			moved = 0;
+			start_x = last_x = lx;
+			last_y = ly;
+			start_scroll = scroll;
+			start_t = esp_timer_get_time();
+		} else if (down && active) {
+			int dx = lx - start_x;
+			if (dx > 10 || dx < -10)
+				moved = 1;
+			if (moved) {
+				int s = start_scroll - dx;
+				if (s < 0)
+					s = 0;
+				if (s > max_scroll)
+					s = max_scroll;
+				if (s != scroll) {
+					scroll = s;
+					stage_strip();
 				}
 			}
+			last_x = lx;
+			last_y = ly;
+		} else if (!down && active) {
+			active = 0;
+			if (!moved && esp_timer_get_time() - start_t < 500000 &&
+			    last_y >= STRIP_Y && last_y < STRIP_Y + STRIP_H) {
+				int idx = card_at(last_x);
+				if (idx >= 0) {
+					animate_to(snap_target(idx));
+					vTaskDelay(pdMS_TO_TICKS(150));
+					return idx;
+				}
+			}
+			/* fling: a fast drag skips one more card */
+			int dir = last_x - start_x > 0 ? -1 : 1;
+			int idx = nearest_card();
+			if (moved && abs(last_x - start_x) > 80) {
+				int s = scroll + dir * (CARD_W + CARD_GAP);
+				idx = 0;
+				int best = 0x7fffffff;
+				for (int i = 0; i < NGAMES; i++) {
+					int d = abs(snap_target(i) - s);
+					if (d < best) {
+						best = d;
+						idx = i;
+					}
+				}
+			}
+			animate_to(snap_target(idx));
 		}
-		vTaskDelay(pdMS_TO_TICKS(20));
+		vTaskDelay(pdMS_TO_TICKS(10));
 	}
 }
 
