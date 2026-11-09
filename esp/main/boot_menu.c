@@ -405,7 +405,7 @@ static void touch_to_menu(uint16_t rx, uint16_t ry, int *x, int *y)
  * right half for volume. No on-screen indicator. Polled from vga_task. */
 void boot_menu_gestures(void)
 {
-	static int active, side, start_x, start_y, start_val, moved;
+	static int active, side, start_x, start_y, last_y, start_val, moved;
 	uint16_t rx = 0, ry = 0, strength[1];
 	uint8_t cnt = 0;
 	int x, y;
@@ -420,36 +420,38 @@ void boot_menu_gestures(void)
 		active = 1;
 		moved = 0;
 		start_x = x;
-		start_y = y;
+		start_y = last_y = y;
 		side = x < MENU_W / 2 ? 0 : 1;
 		start_val = side ? i2s_get_volume() : lcd_get_brightness();
 	} else if (down && active) {
 		int dx = x - start_x;
 		int dy = start_y - y;   /* swipe up is positive */
 
-		if (abs(dy) > 20 && abs(dy) > abs(dx))
+		if (abs(dy) > 30 && abs(dy) > abs(dx))
 			moved = 1;
-		if (moved) {
-			int val = start_val + dy * 100 / 480;
-
-			if (side) {
-				if (val < 0)
-					val = 0;
-				if (val > 100)
-					val = 100;
-				if (val != i2s_get_volume())
-					i2s_set_volume(val);
-			} else {
-				if (val < 10)
-					val = 10;
-				if (val > 100)
-					val = 100;
-				if (val != lcd_get_brightness())
-					bsp_display_brightness_set(val);
-			}
-		}
+		last_y = y;
 	} else if (!down && active) {
 		active = 0;
+		/* One vertical swipe = one 10% step; up is louder/brighter. */
+		if (moved) {
+			int step = last_y < start_y ? 10 : -10;
+
+			if (side) {
+				int v = i2s_get_volume() + step;
+				if (v < 0)
+					v = 0;
+				if (v > 100)
+					v = 100;
+				i2s_set_volume(v);
+			} else {
+				int v = lcd_get_brightness() + step;
+				if (v < 10)
+					v = 10;
+				if (v > 100)
+					v = 100;
+				bsp_display_brightness_set(v);
+			}
+		}
 	}
 }
 

@@ -198,9 +198,9 @@ P4-specific notes:
   panel with the PPA scaler. The PPA scale step is 1/16, so the 640→800 stretch
   is 1.1875 (475 of 480 columns), leaving a few black columns at the right edge.
 - The SD card holds `bios.bin`, `vgabios.bin`, `tiny386.ini` and the disk images.
-- Default audio volume is 50%; in game, swipe up/down on the right half of the
-  screen to change it (left half changes the backlight). There is no on-screen
-  indicator.
+- In game, a vertical swipe on the right half of the screen changes the volume
+  by 10% per swipe (up = louder); the left half does the same for the backlight
+  (10-100%). No on-screen indicator. Default volume is 50%.
 - Serial keyboard: type into `idf.py monitor`. DOS has a 15-character keyboard
   buffer, so enter `D:\PAL.BAT` rather than a longer path. Injected keys are held
   down for 80 ms before the break is sent; games that watch a make/break flag
