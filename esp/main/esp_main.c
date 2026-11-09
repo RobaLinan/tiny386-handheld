@@ -435,6 +435,7 @@ void vga_task(void *arg);
 void i2s_main();
 void wifi_main(const char *, const char *);
 void storage_init(void);
+void i2s_set_volume(int vol);
 void usb_setup(void);
 
 struct esp_ini_config {
@@ -442,6 +443,7 @@ struct esp_ini_config {
 	char ssid[16];
 	char pass[32];
 	int enable_usb;
+	int volume;
 };
 
 static void i386_task(void *arg)
@@ -651,6 +653,9 @@ static int parse_ini(void* user, const char* section,
 		} else if (NAME("enable_usb")) {
 			conf->enable_usb = atoi(value);
 		}
+	} else if (SEC("audio")) {
+		if (NAME("volume"))
+			conf->volume = atoi(value);
 	}
 #undef SEC
 #undef NAME
@@ -733,6 +738,7 @@ void app_main(void)
 		NULL,
 	};
 	static struct esp_ini_config config;
+	config.volume = 80;
 	for (int i = 0; files[i]; i++) {
 		if (ini_parse(files[i], parse_ini, &config) == 0) {
 			config.filename = files[i];
@@ -741,6 +747,7 @@ void app_main(void)
 	}
 	if (!config.filename)
 		fprintf(stderr, "no ini found, booting built-in DOS fallback\n");
+	i2s_set_volume(config.volume);
 
 	if (config.enable_usb) {
 		vTaskDelay(2000 / portTICK_PERIOD_MS);

@@ -29,9 +29,6 @@ static void i2s_task(void *arg)
 		size_t bwritten;
 		memset(buf, 0, MIXER_BUF_LEN * 2);
 		mixer_callback(globals.pc, (uint8_t *) buf, MIXER_BUF_LEN * 2);
-		for (int i = 0; i < MIXER_BUF_LEN; i++) {
-			buf[i] = buf[i] / 16;
-		}
 		i2s_channel_write(tx_chan, buf, MIXER_BUF_LEN * 2, &bwritten, portMAX_DELAY);
 	}
 	i2s_channel_disable(tx_chan);
@@ -50,6 +47,19 @@ static i2s_chan_handle_t                rx_chan;        // I2S rx channel handle
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_vol.h"
 static const char *TAG = "i2s";
+static esp_codec_dev_handle_t s_codec;
+
+void i2s_set_volume(int vol)
+{
+	if (!s_codec)
+		return;
+	if (vol < 0)
+		vol = 0;
+	if (vol > 100)
+		vol = 100;
+	if (esp_codec_dev_set_out_vol(s_codec, vol) == ESP_CODEC_DEV_OK)
+		fprintf(stderr, "audio volume %d\n", vol);
+}
 
 static esp_err_t es8311_codec_init(void)
 {
@@ -113,6 +123,7 @@ static esp_err_t es8311_codec_init(void)
 	};
 	esp_codec_dev_handle_t codec_handle = esp_codec_dev_new(&dev_cfg);
 	assert(codec_handle);
+	s_codec = codec_handle;
 
 	/* Specify the sample configurations and open the device */
 	esp_codec_dev_sample_info_t sample_cfg = {
@@ -176,3 +187,10 @@ void i2s_main()
 	xTaskCreatePinnedToCore(i2s_task, "i2s_task", 4096, NULL, 0, NULL, 0);
 #endif
 }
+
+#ifndef USE_ES8311
+void i2s_set_volume(int vol)
+{
+	(void) vol;
+}
+#endif
