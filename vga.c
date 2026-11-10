@@ -166,11 +166,25 @@ struct VGAState {
 #ifndef LCD_WIDTH
 #define LCD_WIDTH 2048
 #endif
-    uint8_t tmpbuf[(LCD_WIDTH > 720 ? LCD_WIDTH : 720) * 3 * 2];
+#if defined(SWAPXY) && !defined(SCALE_3_2) && !defined(SCALE_2_1)
+/* Lines rendered into tmpbuf before the transposed copy: 32 pixels of one
+ * destination column are 64 bytes, one whole cache line, so the copy
+ * writes full lines instead of 6 bytes per 960-byte stride. */
+#define VGA_KLINE 32
+#else
+#define VGA_KLINE 3
+#endif
+    uint8_t tmpbuf[(LCD_WIDTH > 720 ? LCD_WIDTH : 720) * VGA_KLINE * 2];
 #endif
 };
 
 uint32_t get_uticks();
+#ifdef LCD_FPS_LOG
+/* Time spent in the software renderer, without the board's draw pass;
+ * summed across frames and averaged by the 5 s fps log. */
+uint32_t vga_render_us;
+uint32_t vga_render_frames;
+#endif
 static int after_eq(uint32_t a, uint32_t b)
 {
     return (a - b) < (1u << 31);
@@ -394,6 +408,73 @@ static void scale_2_1(uint8_t *dst, int dst_stride, uint8_t *src, int w)
 #endif
     }
 }
+
+#if defined(SWAPXY) && !defined(SCALE_3_2) && !defined(SCALE_2_1)
+/* Copy VGA_KLINE rows of RGB565 from the row-major strip into the
+ * transposed frame buffer. One destination column is a contiguous run of
+ * VGA_KLINE pixels, and the pair-loop stores 4 bytes at a time, so a run
+ * fills whole cache lines. dst_stride is in bytes (height * 2). */
+static void transpose_copy(uint8_t *dst, int dst_stride, const uint8_t *src,
+                           int w, int rows)
+{
+    for (int x = 0; x < w; x++) {
+        uint8_t *d = dst + (size_t) x * dst_stride;
+        const uint8_t *s = src + x * 2;
+        int y = 0;
+        for (; y + 1 < rows; y += 2, d += 4, s += 2 * w * 2) {
+            ((uint16_t *) d)[0] = *(const uint16_t *) s;
+            ((uint16_t *) d)[1] = *(const uint16_t *) (s + w * 2);
+        }
+        if (y < rows)
+            ((uint16_t *) d)[0] = *(const uint16_t *) s;
+    }
+}
+
+/* Mode 13h / chain-4 fast path: draw one destination column at a time
+ * straight into the transposed frame buffer, so a column is a contiguous
+ * run of h pixels and the strip never round-trips through PSRAM. The two
+ * output columns sharing a source byte are written together and mode 13h
+ * shows each source line twice, so one palette lookup fills a 2x2 block.
+ * Returns 0 when the frame needs the generic renderer. */
+static int chain4_refresh(VGAState *s, FBDevice *fb_dev, const uint8_t *vram,
+                          const uint32_t *palette, int w, int h, int pan,
+                          uint32_t addr1, uint32_t line_offset,
+                          int multi_scan, uint32_t line_bytes, int i0)
+{
+    static uint32_t la[512];
+    uint16_t *fb = (uint16_t *) fb_dev->fb_data + i0 / 2;
+    int stride = fb_dev->stride / 2;
+    int multi_run = multi_scan;
+
+    if (h > (int) (sizeof(la) / sizeof(la[0])))
+        return 0;
+    for (int y = 0; y < h; y++) {
+        uint32_t addr = addr1 & 0x3ffff;
+        if (addr >= (uint32_t) s->vga_ram_size ||
+            line_bytes > (uint32_t) s->vga_ram_size - addr)
+            return 0;
+        la[y] = addr;
+        if (!multi_run) {
+            addr1 += line_offset;
+            multi_run = multi_scan;
+        } else {
+            multi_run--;
+        }
+    }
+    for (int x = 0; x < w; x += 2) {
+        uint16_t *d0 = fb + (size_t) x * stride;
+        uint16_t *d1 = d0 + stride;
+        int x1 = (x >> 1) + pan;
+        for (int y = 0; y < h; y += 2) {
+            uint16_t c = palette[vram[la[y] + x1]];
+            uint32_t cc = c | ((uint32_t) c << 16);
+            ((uint32_t *) d0)[y >> 1] = cc;
+            ((uint32_t *) d1)[y >> 1] = cc;
+        }
+    }
+    return 1;
+}
+#endif
 
 #else
 #error "bad bpp"
@@ -791,6 +872,9 @@ static void vga_text_refresh(VGAState *s,
                              int full_update)
 {
     FBDevice *fb_dev = s->fb_dev;
+#ifdef LCD_FPS_LOG
+    uint32_t t_render = get_uticks();
+#endif
     int width, height, cwidth, cheight, cy, cx, x1, y1, width1, height1;
     int cx_min, cx_max, dup9;
     uint32_t ch_attr, line_offset, start_addr, ch_addr, ch_addr1, ch, cattr;
@@ -911,6 +995,10 @@ static void vga_text_refresh(VGAState *s,
         return; /* not enough space */
     x1 = (fb_dev->width - width1) / 2;
     y1 = (fb_dev->height - height1) / 2;
+    s->content_x = x1;
+    s->content_y = y1;
+    s->content_w = width1;
+    s->content_h = height1;
     int stride = fb_dev->stride;
     if (x1 != s->last_text_x1 || y1 != s->last_text_y1 ||
         width1 != s->last_text_w1 || height1 != s->last_text_h1) {
@@ -1127,6 +1215,10 @@ static void vga_text_refresh(VGAState *s,
     stride = (cxend - cxbegin) * cwidth * (BPP / 8);
     }
 #endif
+#ifdef LCD_FPS_LOG
+    vga_render_us += get_uticks() - t_render;
+    vga_render_frames++;
+#endif
     redraw_func(opaque, 0, 0, fb_dev->width, fb_dev->height);
 }
 
@@ -1135,6 +1227,9 @@ static void vga_graphic_refresh(VGAState *s,
                                 int full_update)
 {
     FBDevice *fb_dev = s->fb_dev;
+#ifdef LCD_FPS_LOG
+    uint32_t t_render = get_uticks();
+#endif
     int w = (s->cr[0x01] + 1) * 8;
     int h = s->cr[0x12] |
         ((s->cr[0x07] & 0x02) << 7) |
@@ -1234,16 +1329,23 @@ static void vga_graphic_refresh(VGAState *s,
 #else
     int hx = fb_dev->height;
     int wx = fb_dev->width;
-    if (h < hx)
-        i0 += (hx - h) / 2 * (BPP / 8);
-    else
+    int y0 = 0, x0 = 0;
+    if (h < hx) {
+        /* Round the picture's first line to a VGA_KLINE boundary so that
+         * each transposed run starts on a cache line. */
+        y0 = ((hx - h) / 2) & ~(VGA_KLINE - 1);
+        i0 += y0 * (BPP / 8);
+    } else {
         h = hx;
-    if (w < wx)
-        i0 += (wx - w) / 2 * fb_dev->stride;
-    else
+    }
+    if (w < wx) {
+        x0 = (wx - w) / 2;
+        i0 += x0 * fb_dev->stride;
+    } else {
         w = wx;
-    s->content_x = (fb_dev->width - w) / 2;
-    s->content_y = (fb_dev->height - h) / 2;
+    }
+    s->content_x = x0;
+    s->content_y = y0;
     s->content_w = w;
     s->content_h = h;
 #endif
@@ -1301,6 +1403,18 @@ static void vga_graphic_refresh(VGAState *s,
         line_bytes = 4 * ((((w - 1) / xdiv + pan) >> 3) + 1);
     else
         line_bytes = ((w - 1) / xdiv + pan + 1) * ((bpp + 7) / 8);
+#if defined(SWAPXY) && !defined(SCALE_3_2) && !defined(SCALE_2_1)
+    /* Chain-4 8bpp (mode 13h): no planar registers, no split screen and
+     * every source line shown exactly twice. */
+    if (!vbe && shift_control >= 2 && bpp == 8 && xdiv == 2 &&
+        (s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M) &&
+        (s->cr[0x17] & 3) == 3 && multi_scan == 1 &&
+        (split_after < 0 || split_after >= h) &&
+        !(w & 1) && !(h & 1) &&
+        chain4_refresh(s, fb_dev, vram, palette, w, h, pan, addr1,
+                       line_offset, multi_scan, line_bytes, i0))
+        goto redraw;
+#endif
     for (int y = 0; y < h; y++) {
         uint32_t addr = addr1;
         if (!(s->cr[0x17] & 1)) {
@@ -1443,8 +1557,7 @@ static void vga_graphic_refresh(VGAState *s,
             }
 #if defined(SCALE_3_2) || defined(SCALE_2_1) || defined(SWAPXY)
             int i = (BPP / 8) * (yyt * w + x);
-            s->tmpbuf[i + 0] = color;
-            s->tmpbuf[i + 1] = color >> 8;
+            *(uint16_t *) (s->tmpbuf + i) = color;
 #else
             int i = (BPP / 8) * (y * fb_dev->width + x) + i0;
 #if defined(VGA_STORE_CHANGED) && !defined(HOST_WORDS_BIGENDIAN)
@@ -1482,8 +1595,10 @@ static void vga_graphic_refresh(VGAState *s,
 #if defined(SCALE_3_2) || defined(SCALE_2_1) || defined(SWAPXY)
 #if defined(SCALE_2_1)
 #define KLINE 2
-#else
+#elif defined(SCALE_3_2)
 #define KLINE 3
+#else
+#define KLINE VGA_KLINE
 #endif
         yyt++;
         if (yyt == KLINE) {
@@ -1501,14 +1616,30 @@ static void vga_graphic_refresh(VGAState *s,
             yyt = 0;
             yy += 1;
 #else
-            scale_3_3(fb_dev->fb_data + ii0, fb_dev->stride, s->tmpbuf, w);
+            transpose_copy(fb_dev->fb_data + ii0, fb_dev->stride,
+                           s->tmpbuf, w, KLINE);
             yyt = 0;
-            yy += 3;
+            yy += KLINE;
 #endif
         }
 #undef KLINE
 #endif
     }
+#if defined(SWAPXY) && !defined(SCALE_3_2) && !defined(SCALE_2_1)
+    /* the last strip is not a multiple of VGA_KLINE lines */
+    if (yyt) {
+        int ii0 = (BPP / 8) * yy + i0;
+        transpose_copy(fb_dev->fb_data + ii0, fb_dev->stride,
+                       s->tmpbuf, w, yyt);
+    }
+#endif
+#if defined(SWAPXY) && !defined(SCALE_3_2) && !defined(SCALE_2_1)
+redraw:
+#endif
+#ifdef LCD_FPS_LOG
+    vga_render_us += get_uticks() - t_render;
+    vga_render_frames++;
+#endif
     redraw_func(opaque, 0, 0, fb_dev->width, fb_dev->height);
 }
 

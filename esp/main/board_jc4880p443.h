@@ -14,6 +14,8 @@
 #define LCD_FPS_LOG
 #define LCD_FPS_OVERLAY
 #define BOOT_MENU
+/* benchmark: boot the first game (PAL) if nobody touches the menu */
+#define MENU_AUTO_BOOT_MS 3000
 
 // XXX: ld reports "error: Total discarded sections size is X bytes"
 //#define IRAM_ATTR_CPU_EXEC1 IRAM_ATTR

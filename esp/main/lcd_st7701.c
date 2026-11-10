@@ -38,6 +38,7 @@
 //#include "bsp/esp-bsp.h"
 
 #include "common.h"
+#include "esp_cache.h"
 #include "../../pc.h"
 #include "../../term.h"
 #include "../../i8042.h"
@@ -244,13 +245,14 @@ static void lcd_fill_init(esp_lcd_panel_handle_t panel)
  * logical picture appears landscape. */
 void lcd_fill_frame(void *src, int cx, int cy, int cw, int ch)
 {
+	int idx = fill_fb_next ^ 1;
+#ifdef SWAPXY
 	float sx = (float) LCD_HEIGHT / ch;
 	float sy = (float) LCD_WIDTH / cw;
 	int ow = (int) (sx * ch);
 	int oh = (int) (sy * cw);
 	int xoff = (LCD_HEIGHT - ow) / 2;
 	int yoff = (LCD_WIDTH - oh) / 2;
-	int idx = fill_fb_next ^ 1;
 
 	ppa_srm_oper_config_t c = {
 		.in.buffer = src,
@@ -273,6 +275,18 @@ void lcd_fill_frame(void *src, int cx, int cy, int cw, int ch)
 		.scale_y = sy,
 		.mode = PPA_TRANS_MODE_BLOCKING,
 	};
+	/* The CPU-rendered source must reach PSRAM before the PPA DMA reads it,
+	 * and stale cache lines of the destination must not be written back over
+	 * the PPA output (this is what turned the panel black at -O2). */
+	ESP_ERROR_CHECK(esp_cache_msync(src,
+			(size_t) LCD_WIDTH * LCD_HEIGHT * 2,
+			ESP_CACHE_MSYNC_FLAG_DIR_C2M |
+			ESP_CACHE_MSYNC_FLAG_UNALIGNED));
+	ESP_ERROR_CHECK(esp_cache_msync(fill_fb[idx],
+			(size_t) LCD_HEIGHT * LCD_WIDTH * 2,
+			ESP_CACHE_MSYNC_FLAG_DIR_C2M |
+			ESP_CACHE_MSYNC_FLAG_INVALIDATE |
+			ESP_CACHE_MSYNC_FLAG_UNALIGNED));
 	ESP_ERROR_CHECK(ppa_do_scale_rotate_mirror(ppa_srm, &c));
 	/* PPA's scale step is 1/16, so 1.2 comes out as 1.1875 (475 of 480
 	 * columns). Keep the uncovered columns black or they flash with the
@@ -286,6 +300,56 @@ void lcd_fill_frame(void *src, int cx, int cy, int cw, int ch)
 		for (int x = start; x < LCD_HEIGHT; x++)
 			memset(fb + (size_t) x * LCD_WIDTH, 0, LCD_WIDTH * 2);
 	}
+#else
+	/* Landscape source (800x480, row-major) and a portrait-scanned panel:
+	 * let the PPA do the 90° rotation that SWAPXY used to do in software. */
+	float sx = (float) LCD_HEIGHT / ch;   /* output width  / rotated block width  */
+	float sy = (float) LCD_WIDTH / cw;    /* output height / rotated block height */
+
+	ppa_srm_oper_config_t c = {
+		.in.buffer = src,
+		.in.pic_w = LCD_WIDTH,
+		.in.pic_h = LCD_HEIGHT,
+		.in.block_w = cw,
+		.in.block_h = ch,
+		.in.block_offset_x = cx,
+		.in.block_offset_y = cy,
+		.in.srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+		.out.buffer = fill_fb[idx],
+		.out.buffer_size = LCD_HEIGHT * LCD_WIDTH * 2,
+		.out.pic_w = LCD_HEIGHT,
+		.out.pic_h = LCD_WIDTH,
+		.out.block_offset_x = 0,
+		.out.block_offset_y = 0,
+		.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+		.rotation_angle = PPA_SRM_ROTATION_ANGLE_90,
+		.scale_x = sx,
+		.scale_y = sy,
+		.mode = PPA_TRANS_MODE_BLOCKING,
+	};
+	/* The CPU-rendered source must reach PSRAM before the PPA DMA reads it,
+	 * and stale cache lines of the destination must not be written back over
+	 * the PPA output (this is what turned the panel black at -O2). */
+	ESP_ERROR_CHECK(esp_cache_msync(src,
+			(size_t) LCD_WIDTH * LCD_HEIGHT * 2,
+			ESP_CACHE_MSYNC_FLAG_DIR_C2M |
+			ESP_CACHE_MSYNC_FLAG_UNALIGNED));
+	ESP_ERROR_CHECK(esp_cache_msync(fill_fb[idx],
+			(size_t) LCD_HEIGHT * LCD_WIDTH * 2,
+			ESP_CACHE_MSYNC_FLAG_DIR_C2M |
+			ESP_CACHE_MSYNC_FLAG_INVALIDATE |
+			ESP_CACHE_MSYNC_FLAG_UNALIGNED));
+	ESP_ERROR_CHECK(ppa_do_scale_rotate_mirror(ppa_srm, &c));
+	/* PPA scale step is 1/16: 1.2 -> 1.1875, so clear the last 5 columns
+	 * of the portrait output (480 wide, stride 480). */
+	int eff_w = (int) (sx * 16) * ch / 16;
+	if (eff_w < LCD_HEIGHT) {
+		uint16_t *fb = fill_fb[idx];
+		for (int x = eff_w; x < LCD_HEIGHT; x++)
+			for (int y = 0; y < LCD_WIDTH; y++)
+				fb[(size_t) y * LCD_HEIGHT + x] = 0;
+	}
+#endif
 	ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(globals.panel, 0, 0,
 						  LCD_HEIGHT, LCD_WIDTH,
 						  fill_fb[idx]));
@@ -413,11 +477,38 @@ void vga_task(void *arg)
 #endif
 
 	while (1) {
+#ifdef LCD_FPS_LOG
+		uint32_t t0 = get_uticks();
+#endif
 		pc_vga_step(globals.pc);
 #ifdef USE_USB_SERIAL_KBD
 		term_step(term);
 #endif
-		vTaskDelay(10 / portTICK_PERIOD_MS);
+#ifdef LCD_FPS_LOG
+		uint32_t t1 = get_uticks();
+#endif
+		vTaskDelay(1 / portTICK_PERIOD_MS);
+#ifdef LCD_FPS_LOG
+		{
+			uint32_t t2 = get_uticks();
+			static uint32_t acc_work, acc_delay;
+			static int n, last;
+			acc_work += t1 - t0;
+			acc_delay += t2 - t1;
+			n++;
+			if (!last)
+				last = t2;
+			if (t2 - last >= 5000000) {
+				fprintf(stderr, "vga_task: work %lu us, delay %lu us\n",
+					(unsigned long)(acc_work / n),
+					(unsigned long)(acc_delay / n));
+				n = 0;
+				acc_work = 0;
+				acc_delay = 0;
+				last = t2;
+			}
+		}
+#endif
 	}
 }
 #endif

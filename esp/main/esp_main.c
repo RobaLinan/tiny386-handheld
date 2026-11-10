@@ -174,7 +174,11 @@ extern const uint8_t vgafont16[256 * 16];
 static void fps_px(Console *s, int x, int y, uint16_t c)
 {
 	if (x >= 0 && x < LCD_WIDTH && y >= 0 && y < LCD_HEIGHT)
+#ifdef SWAPXY
 		((uint16_t *) s->fb)[x * LCD_HEIGHT + y] = c;
+#else
+		((uint16_t *) s->fb)[y * LCD_WIDTH + x] = c;
+#endif
 }
 
 /* Small "N FPS" in the top-left of the picture, like a Steam Deck overlay.
@@ -320,11 +324,16 @@ static void redraw(void *opaque,
 	(void)t0;
 	frames++;
 	if (now - last_us >= 5000000) {
-		fprintf(stderr, "lcd: %d fps, prep %ld us, draw %ld us, rect %d,%d %dx%d fill %d\n",
+		extern uint32_t vga_render_us, vga_render_frames;
+		fprintf(stderr, "lcd: %d fps, render %lu us, draw %ld us, rect %d,%d %dx%d fill %d text %d\n",
 			(int)((long long)frames * 1000000 / (now - last_us)),
-			frames ? prep_us / frames : 0,
+			(unsigned long)(vga_render_frames ?
+				       vga_render_us / vga_render_frames : 0),
 			frames ? draw_us / frames : 0,
-			cx, cy, cw, ch, fill);
+			cx, cy, cw, ch, fill,
+			vga_is_text_mode(s->pc->vga));
+		vga_render_us = 0;
+		vga_render_frames = 0;
 		frames = 0;
 		prep_us = 0;
 		draw_us = 0;
