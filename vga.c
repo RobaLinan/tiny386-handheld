@@ -179,12 +179,6 @@ struct VGAState {
 };
 
 uint32_t get_uticks();
-#ifdef LCD_FPS_LOG
-/* Time spent in the software renderer, without the board's draw pass;
- * summed across frames and averaged by the 5 s fps log. */
-uint32_t vga_render_us;
-uint32_t vga_render_frames;
-#endif
 static int after_eq(uint32_t a, uint32_t b)
 {
     return (a - b) < (1u << 31);
@@ -872,9 +866,6 @@ static void vga_text_refresh(VGAState *s,
                              int full_update)
 {
     FBDevice *fb_dev = s->fb_dev;
-#ifdef LCD_FPS_LOG
-    uint32_t t_render = get_uticks();
-#endif
     int width, height, cwidth, cheight, cy, cx, x1, y1, width1, height1;
     int cx_min, cx_max, dup9;
     uint32_t ch_attr, line_offset, start_addr, ch_addr, ch_addr1, ch, cattr;
@@ -1215,10 +1206,6 @@ static void vga_text_refresh(VGAState *s,
     stride = (cxend - cxbegin) * cwidth * (BPP / 8);
     }
 #endif
-#ifdef LCD_FPS_LOG
-    vga_render_us += get_uticks() - t_render;
-    vga_render_frames++;
-#endif
     redraw_func(opaque, 0, 0, fb_dev->width, fb_dev->height);
 }
 
@@ -1227,9 +1214,6 @@ static void vga_graphic_refresh(VGAState *s,
                                 int full_update)
 {
     FBDevice *fb_dev = s->fb_dev;
-#ifdef LCD_FPS_LOG
-    uint32_t t_render = get_uticks();
-#endif
     int w = (s->cr[0x01] + 1) * 8;
     int h = s->cr[0x12] |
         ((s->cr[0x07] & 0x02) << 7) |
@@ -1635,10 +1619,6 @@ static void vga_graphic_refresh(VGAState *s,
 #endif
 #if defined(SWAPXY) && !defined(SCALE_3_2) && !defined(SCALE_2_1)
 redraw:
-#endif
-#ifdef LCD_FPS_LOG
-    vga_render_us += get_uticks() - t_render;
-    vga_render_frames++;
 #endif
     redraw_func(opaque, 0, 0, fb_dev->width, fb_dev->height);
 }

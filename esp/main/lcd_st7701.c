@@ -477,38 +477,11 @@ void vga_task(void *arg)
 #endif
 
 	while (1) {
-#ifdef LCD_FPS_LOG
-		uint32_t t0 = get_uticks();
-#endif
 		pc_vga_step(globals.pc);
 #ifdef USE_USB_SERIAL_KBD
 		term_step(term);
 #endif
-#ifdef LCD_FPS_LOG
-		uint32_t t1 = get_uticks();
-#endif
 		vTaskDelay(1 / portTICK_PERIOD_MS);
-#ifdef LCD_FPS_LOG
-		{
-			uint32_t t2 = get_uticks();
-			static uint32_t acc_work, acc_delay;
-			static int n, last;
-			acc_work += t1 - t0;
-			acc_delay += t2 - t1;
-			n++;
-			if (!last)
-				last = t2;
-			if (t2 - last >= 5000000) {
-				fprintf(stderr, "vga_task: work %lu us, delay %lu us\n",
-					(unsigned long)(acc_work / n),
-					(unsigned long)(acc_delay / n));
-				n = 0;
-				acc_work = 0;
-				acc_delay = 0;
-				last = t2;
-			}
-		}
-#endif
 	}
 }
 #endif

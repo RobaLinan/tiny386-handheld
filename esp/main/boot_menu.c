@@ -489,7 +489,6 @@ int boot_menu(esp_lcd_panel_handle_t panel)
 	int active = 0, start_x = 0, start_scroll = 0, last_x = 0, last_y = 0;
 	int moved = 0;
 	int64_t start_t = 0;
-	int64_t menu_start = esp_timer_get_time();
 
 	for (;;) {
 		uint16_t rx = 0, ry = 0, strength[1];
@@ -552,14 +551,6 @@ int boot_menu(esp_lcd_panel_handle_t panel)
 			}
 			animate_to(snap_target(idx));
 		}
-#ifdef MENU_AUTO_BOOT_MS
-		if (!down && !active &&
-		    esp_timer_get_time() - menu_start >
-			    (int64_t) MENU_AUTO_BOOT_MS * 1000) {
-			ESP_LOGI(TAG, "no input, auto-booting first game");
-			return 0;
-		}
-#endif
 		vTaskDelay(pdMS_TO_TICKS(10));
 	}
 }

@@ -245,12 +245,6 @@ static void redraw(void *opaque,
 	return;
 #endif
 	Console *s = opaque;
-#ifdef LCD_FPS_LOG
-	static int frames, last_us;
-	static long draw_us, prep_us;
-	int now = get_uticks();
-	int t0 = now;
-#endif
 	int cx = 0, cy = 0, cw = 0, ch = 0, fill = 0;
 #ifdef LCD_FILL_SCREEN
 	vga_get_content_rect(s->pc->vga, &cx, &cy, &cw, &ch);
@@ -274,12 +268,8 @@ static void redraw(void *opaque,
 #endif
 #ifdef LCD_FILL_DIRECT
 	if (fill) {
-		int td = get_uticks();
 		lcd_fill_frame(s->fb, cx, cy, cw, ch);
 		vga_step(s->pc->vga);
-#ifdef LCD_FPS_LOG
-		draw_us += get_uticks() - td;
-#endif
 	} else
 #endif
 #ifdef LCD_SINGLE_FRAME
@@ -294,9 +284,6 @@ static void redraw(void *opaque,
 		int rows = y1 - y0;
 		if (rows <= 0)
 			continue;
-#ifdef LCD_FPS_LOG
-		int tp = get_uticks();
-#endif
 #if defined(LCD_FILL_SCREEN) && !defined(LCD_FILL_DIRECT)
 		if (fill) {
 			fill_band(s, cx, cy, cw, ch, y0, y1);
@@ -306,38 +293,11 @@ static void redraw(void *opaque,
 			uint16_t *src = (uint16_t *) s->fb + (size_t)FB_W * y0;
 			memcpy(s->fb1, src, (size_t)FB_W * rows * 2);
 		}
-#ifdef LCD_FPS_LOG
-		int td = get_uticks();
-		prep_us += td - tp;
-#endif
 		lcd_draw(0, y0, FB_W, y1, s->fb1);
 		vga_step(s->pc->vga);
 #ifndef LCD_NO_BAND_DELAY
 		usleep(900);
 #endif
-#ifdef LCD_FPS_LOG
-		draw_us += get_uticks() - td;
-#endif
-	}
-#endif
-#ifdef LCD_FPS_LOG
-	(void)t0;
-	frames++;
-	if (now - last_us >= 5000000) {
-		extern uint32_t vga_render_us, vga_render_frames;
-		fprintf(stderr, "lcd: %d fps, render %lu us, draw %ld us, rect %d,%d %dx%d fill %d text %d\n",
-			(int)((long long)frames * 1000000 / (now - last_us)),
-			(unsigned long)(vga_render_frames ?
-				       vga_render_us / vga_render_frames : 0),
-			frames ? draw_us / frames : 0,
-			cx, cy, cw, ch, fill,
-			vga_is_text_mode(s->pc->vga));
-		vga_render_us = 0;
-		vga_render_frames = 0;
-		frames = 0;
-		prep_us = 0;
-		draw_us = 0;
-		last_us = now;
 	}
 #endif
 }
