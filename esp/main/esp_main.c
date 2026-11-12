@@ -333,7 +333,7 @@ static void boot_autolaunch(PC *pc)
 	static uint32_t t, next_scan;
 	uint32_t now = get_uticks();
 
-	if (done || boot_choice > 1)
+	if (done)
 		return;
 	if (!started) {
 		if (now < next_scan)
