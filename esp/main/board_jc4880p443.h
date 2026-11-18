@@ -1,7 +1,8 @@
 // requires esp-idf v6.0.x
 #define BUILD_ESP32
 
-#define PSRAM_ALLOC_LEN (10 * 1024 * 1024)
+/* 16M: Theme Hospital needs ~10M guest RAM + 768K VGA (12M/768K recommended). */
+#define PSRAM_ALLOC_LEN (16 * 1024 * 1024)
 #define BOARD_NO_BUILTIN_DOS_IMG
 
 /* USB-Serial/JTAG doubles as the keyboard console (same as the 543 port). */
@@ -13,6 +14,16 @@
 #define LCD_NO_BAND_DELAY
 #define LCD_FPS_OVERLAY
 #define BOOT_MENU
+
+/* 3x4 key matrix + analog stick on the handheld PCB. */
+#define USE_GAMEPAD
+
+/* Battery divider node: JP1 pin 9, BAT+ --10k--+--10k-- GND. */
+#define BATTERY_ADC_GPIO 51
+
+/* Gauge top: a full pack reads ~4.15 V under normal load (USB and battery),
+ * so 4.10 V is treated as 100% to keep some margin for load sag and noise. */
+#define BATTERY_FULL_MV 4100
 
 // XXX: ld reports "error: Total discarded sections size is X bytes"
 //#define IRAM_ATTR_CPU_EXEC1 IRAM_ATTR

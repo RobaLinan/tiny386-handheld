@@ -5,7 +5,11 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <stdbool.h>
 #include <inttypes.h>
+#include <string.h>
+#include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
 #include "sdkconfig.h"
@@ -31,6 +35,11 @@
 #include "../../i8042.h"
 #include "../../term.h"
 #include "common.h"
+#include "gamepad.h"
+#include "battery.h"
+#include "board_adc.h"
+#include "wifi.h"
+#include "sdcli.h"
 
 //
 #include "esp_private/system_internal.h"
@@ -168,10 +177,10 @@ Console *console_init(int width, int height)
 
 void lcd_draw(int x_start, int y_start, int x_end, int y_end, void *src);
 
-#ifdef LCD_FPS_OVERLAY
+#if defined(LCD_FPS_OVERLAY) || defined(BATTERY_ADC_GPIO)
 extern const uint8_t vgafont16[256 * 16];
 
-static void fps_px(Console *s, int x, int y, uint16_t c)
+static void hud_px(Console *s, int x, int y, uint16_t c)
 {
 	if (x >= 0 && x < LCD_WIDTH && y >= 0 && y < LCD_HEIGHT)
 #ifdef SWAPXY
@@ -180,7 +189,9 @@ static void fps_px(Console *s, int x, int y, uint16_t c)
 		((uint16_t *) s->fb)[y * LCD_WIDTH + x] = c;
 #endif
 }
+#endif
 
+#ifdef LCD_FPS_OVERLAY
 /* Small "N FPS" in the top-left of the picture, like a Steam Deck overlay.
  * Drawn into the VGA buffer so the PPA scales it with the frame. */
 static void draw_fps_overlay(Console *s, int cx, int cy, int fps)
@@ -194,12 +205,65 @@ static void draw_fps_overlay(Console *s, int cx, int cy, int fps)
 		for (int row = 0; row < 16; row++)
 			for (int col = 0; col < 8; col++)
 				if (g[row] & (0x80 >> col)) {
-					fps_px(s, x0 + col + 1, y0 + row + 1,
+					hud_px(s, x0 + col + 1, y0 + row + 1,
 					       0x0000);
-					fps_px(s, x0 + col, y0 + row, 0xFFFF);
+					hud_px(s, x0 + col, y0 + row, 0xFFFF);
 				}
 		x0 += 8;
 	}
+}
+#endif
+
+#ifdef BATTERY_ADC_GPIO
+static void hud_rect(Console *s, int x, int y, int w, int h, uint16_t c)
+{
+	for (int yy = y; yy < y + h; yy++)
+		for (int xx = x; xx < x + w; xx++)
+			hud_px(s, xx, yy, c);
+}
+
+static void hud_text(Console *s, int x, int y, const char *t, uint16_t c)
+{
+	for (; *t; t++) {
+		const uint8_t *g = vgafont16 + (uint8_t) *t * 16;
+		for (int row = 0; row < 16; row++)
+			for (int col = 0; col < 8; col++)
+				if (g[row] & (0x80 >> col)) {
+					hud_px(s, x + col + 1, y + row + 1,
+					       0x0000);
+					hud_px(s, x + col, y + row, c);
+				}
+		x += 8;
+	}
+}
+
+/* Battery icon + percentage in the top-right of the picture, same layer as
+ * the FPS counter. Green >= 50%, yellow 20..49%, red < 20%. */
+static void draw_batt_overlay(Console *s, int x_right, int y_top, int pct)
+{
+	char buf[16];
+	uint16_t color = pct >= 50 ? 0x07E0 :
+			 pct >= 20 ? 0xFFE0 : 0xF800;
+	int bw = 22, bh = 12;
+	int x0 = x_right - 4 - bw;
+	int y0 = y_top + 2;
+	int inner_w = bw - 4;
+	int filled = inner_w * pct / 100;
+
+	snprintf(buf, sizeof(buf), "%d%%", pct);
+	hud_text(s, x0 - 6 - (int) strlen(buf) * 8, y_top, buf, color);
+
+	/* black drop shadow, then white shell, then the colored fill */
+	hud_rect(s, x0 - 1, y0 - 1, bw + 2, bh + 2, 0x0000);
+	hud_rect(s, x0 + bw, y0 + 3, 4, 6, 0x0000);
+	hud_rect(s, x0, y0, bw, 1, 0xFFFF);
+	hud_rect(s, x0, y0 + bh - 1, bw, 1, 0xFFFF);
+	hud_rect(s, x0, y0, 1, bh, 0xFFFF);
+	hud_rect(s, x0 + bw - 1, y0, 1, bh, 0xFFFF);
+	hud_rect(s, x0 + bw, y0 + 4, 3, 4, 0xFFFF);
+	hud_rect(s, x0 + 2, y0 + 2, inner_w, bh - 4, 0x0000);
+	if (filled > 0)
+		hud_rect(s, x0 + 2, y0 + 2, filled, bh - 4, color);
 }
 #endif
 
@@ -265,6 +329,15 @@ static void redraw(void *opaque,
 	}
 	if (fill)
 		draw_fps_overlay(s, cx, cy, ov_fps);
+#endif
+#ifdef BATTERY_ADC_GPIO
+	{
+		int pct = battery_get_percent();
+
+		if (pct >= 0)
+			draw_batt_overlay(s, fill ? cx + cw - 4 : LCD_WIDTH - 4,
+					  fill ? cy + 4 : 4, pct);
+	}
 #endif
 #ifdef LCD_FILL_DIRECT
 	if (fill) {
@@ -343,6 +416,7 @@ static void boot_autolaunch(PC *pc)
 			return;
 		cmd = boot_menu_cmd(boot_choice);
 		if (!cmd) {
+			gamepad_set_enabled(1);
 			done = 1;
 			return;
 		}
@@ -366,6 +440,7 @@ static void boot_autolaunch(PC *pc)
 		return;
 	if (!cmd[pos]) {
 		fprintf(stderr, "autolaunch: done\n");
+		gamepad_set_enabled(1);
 		done = 1;
 		return;
 	}
@@ -455,9 +530,11 @@ void usb_setup(void);
 
 struct esp_ini_config {
 	const char *filename;
-	char ssid[16];
-	char pass[32];
+	char ssid[33];
+	char pass[65];
+	char web_pass[65];
 	int enable_usb;
+	int web;
 };
 
 static void i386_task(void *arg)
@@ -472,6 +549,9 @@ static void i386_task(void *arg)
 	                    pdFALSE,
 	                    pdFALSE,
 	                    portMAX_DELAY);
+	/* The USB-Serial/JTAG console is the boot-menu file channel; hand it
+	 * to term.c before the DOS serial keyboard starts. */
+	sdcli_stop();
 	pc_main(config->filename);
 	vTaskDelete(NULL);
 }
@@ -599,56 +679,133 @@ static void install_fast_boot(void)
 }
 #endif
 
-/* Insert cdb into an existing ini without disturbing its other settings. */
-static void add_cdb_to_ini(void)
+static bool ini_key_is(const char *p, size_t len, const char *key)
+{
+	size_t k = strlen(key);
+
+	if (len < k || strncmp(p, key, k) != 0)
+		return false;
+	return len == k || p[k] == ' ' || p[k] == '\t' || p[k] == '=';
+}
+
+/* Add one cdb line to the existing [pc] section if it is missing.  The old
+ * version rewrote the whole file from a template and silently discarded
+ * every user setting.  This only inserts the missing key. */
+static void ensure_cdb_in_ini(void)
 {
 	FILE *f = fopen("/sdcard/tiny386.ini", "rb");
+	long size;
+	char *cur;
+	size_t n;
+	bool in_pc = false, has_cdb = false, insert_nl = false;
+	char *insert = NULL;
+	char *line;
+
 	if (!f)
 		return;
-	char cur[512];
-	int n = fread(cur, 1, sizeof(cur) - 1, f);
-	fclose(f);
-	if (n < 0)
-		n = 0;
-	cur[n] = 0;
-	if (strstr(cur, "hdc") && strstr(cur, "cdb"))
+	if (fseek(f, 0, SEEK_END) != 0) {
+		fclose(f);
 		return;
+	}
+	size = ftell(f);
+	if (size < 0 || size > 8191) {
+		fclose(f);
+		fprintf(stderr, "tiny386.ini too large; cdb not added\n");
+		return;
+	}
+	rewind(f);
+	cur = malloc((size_t) size + 1);
+	if (!cur) {
+		fclose(f);
+		return;
+	}
+	n = fread(cur, 1, (size_t) size, f);
+	fclose(f);
+	cur[n] = 0;
+
+	for (line = cur; *line; ) {
+		char *eol = strchr(line, '\n');
+		size_t len = eol ? (size_t) (eol - line) : strlen(line);
+		char *s = line;
+		size_t l = len;
+
+		if (l && s[l - 1] == '\r')
+			l--;
+		while (l && (*s == ' ' || *s == '\t')) {
+			s++;
+			l--;
+		}
+		if (l && s[0] == '[') {
+			in_pc = l >= 4 && !strncmp(s, "[pc]", 4);
+			if (in_pc && !insert) {
+				insert = eol ? eol + 1 : line + len;
+				insert_nl = eol != NULL;
+			}
+		} else if (in_pc && ini_key_is(s, l, "cdb")) {
+			has_cdb = true;
+			break;
+		}
+		if (!eol)
+			break;
+		line = eol + 1;
+	}
+	if (has_cdb) {
+		free(cur);
+		return;
+	}
+	if (!insert) {
+		free(cur);
+		fprintf(stderr, "tiny386.ini: no [pc] section, cdb not added\n");
+		return;
+	}
 	FILE *iso = fopen("/sdcard/paldos.iso", "rb");
 	if (!iso) {
-		fprintf(stderr, "paldos.iso missing: PAL CD check will fail\n");
+		free(cur);
+		fprintf(stderr, "paldos.iso missing: cdb not added\n");
 		return;
 	}
 	fclose(iso);
-	FILE *b = fopen("/sdcard/tiny386.bak", "wb");
+
+	/* Keep the user's tiny386.bak untouched: it may hold the config the
+	 * old template overwrote.  Use a separate backup for this edit. */
+	FILE *b = fopen("/sdcard/tiny386.cdb.bak", "wb");
 	if (b) {
 		fwrite(cur, 1, n, b);
 		fclose(b);
 	}
-	static const char ini[] =
-		"[pc]\n"
-		"bios = /sdcard/bios.bin\n"
-		"vga_bios = /sdcard/vgabios.bin\n"
-		"mem_size = 4M\n"
-		"vga_mem_size = 768K\n"
-		"hda = /sdcard/dos_fast.img\n"
-		"hdc = /sdcard/games.img\n"
-		"cdb = /sdcard/paldos.iso\n"
-		"fill_cmos = 1\n"
-		"vga_force_8dm = 1\n"
-		"\n[display]\n"
-		"width = 640\n"
-		"height = 480\n"
-		"\n[cpu]\n"
-		"gen = 3\n"
-		"fpu = 0\n";
-	FILE *w = fopen("/sdcard/tiny386.ini", "wb");
+	FILE *w = fopen("/sdcard/.ini.tmp", "wb");
 	if (!w) {
-		perror("tiny386.ini");
+		free(cur);
+		perror("ini tmp");
 		return;
 	}
-	fputs(ini, w);
+	size_t off = (size_t) (insert - cur);
+	fwrite(cur, 1, off, w);
+	if (!insert_nl)
+		fputc('\n', w);
+	fputs("cdb = /sdcard/paldos.iso\n", w);
+	fwrite(cur + off, 1, n - off, w);
+	fflush(w);
 	fclose(w);
-	fprintf(stderr, "tiny386.ini: PAL layout hdc=D:, cdb=CD\n");
+	remove("/sdcard/tiny386.ini");
+	if (rename("/sdcard/.ini.tmp", "/sdcard/tiny386.ini") != 0) {
+		perror("tiny386.ini rename");
+		rename("/sdcard/tiny386.cdb.bak", "/sdcard/tiny386.ini");
+		free(cur);
+		return;
+	}
+	free(cur);
+	fprintf(stderr, "tiny386.ini: cdb added, other settings preserved\n");
+}
+
+static void copy_ini_value(char *dst, size_t dst_len, const char *value)
+{
+	size_t n = strlen(value);
+
+	if (n >= dst_len)
+		n = dst_len - 1;
+	memcpy(dst, value, n);
+	dst[n] = 0;
 }
 
 static int parse_ini(void* user, const char* section,
@@ -659,11 +816,14 @@ static int parse_ini(void* user, const char* section,
 #define NAME(a) (strcmp(name, a) == 0)
 	if (SEC("esp")) {
 		if (NAME("ssid")) {
-			if (strlen(value) < 32)
-				strcpy(conf->ssid, value);
+			copy_ini_value(conf->ssid, sizeof(conf->ssid), value);
 		} else if (NAME("pass")) {
-			if (strlen(value) < 64)
-				strcpy(conf->pass, value);
+			copy_ini_value(conf->pass, sizeof(conf->pass), value);
+		} else if (NAME("web_pass")) {
+			copy_ini_value(conf->web_pass, sizeof(conf->web_pass),
+				       value);
+		} else if (NAME("web")) {
+			conf->web = atoi(value) != 0;
 		} else if (NAME("enable_usb")) {
 			conf->enable_usb = atoi(value);
 		}
@@ -704,6 +864,11 @@ void app_main(void)
 
 	i2s_main();
 	storage_init();
+#if defined(USE_GAMEPAD) || defined(BATTERY_ADC_GPIO)
+	board_adc2_init();
+#endif
+	battery_init();
+	gamepad_init();
 #ifdef SD_LIST
 	{
 		DIR *d = opendir("/sdcard");
@@ -731,7 +896,7 @@ void app_main(void)
 #ifndef BOARD_NO_BUILTIN_DOS_IMG
 	install_fast_boot();
 #endif
-	add_cdb_to_ini();
+	ensure_cdb_in_ini();
 
 	esp_psram_init();
 #ifndef PSRAM_ALLOC_LEN
@@ -749,6 +914,11 @@ void app_main(void)
 		NULL,
 	};
 	static struct esp_ini_config config;
+	/* The C6 hosted link on this board only passes broadcast traffic:
+	 * ARP/DHCP work but unicast ICMP/TCP does not, so the web UI cannot be
+	 * reached.  Leave it off by default; set web = 1 in [esp] to try it
+	 * after fixing the C6/host data path. */
+	config.web = 0;
 	for (int i = 0; files[i]; i++) {
 		if (ini_parse(files[i], parse_ini, &config) == 0) {
 			config.filename = files[i];
@@ -763,9 +933,16 @@ void app_main(void)
 		usb_setup();
 	}
 
-	if (config.ssid[0]) {
+#ifdef BOOT_MENU
+	/* vga_task starts this right before the boot menu and stops it when a
+	 * game is picked, so WiFi never runs during emulation. */
+	wifi_configure(config.ssid, config.pass, config.web_pass, config.web);
+#else
+	if (config.ssid[0])
 		wifi_main(config.ssid, config.pass);
-	}
+#endif
+	/* Available until the menu selection starts the emulator. */
+	sdcli_start();
 
 	if (psram) {
 		xTaskCreatePinnedToCore(i386_task, "i386_main", 8192, &config, 3, NULL, 1);

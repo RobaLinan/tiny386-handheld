@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/i2c_master.h"
@@ -16,6 +17,8 @@
 #include "esp_timer.h"
 
 #include "common.h"
+#include "gamepad.h"
+#include "wifi.h"
 #include "../../ini.h"
 
 extern const uint8_t vgafont16[256 * 16];
@@ -30,15 +33,20 @@ int i2s_get_volume(void);
  *   title = PAL
  *   cmd = D:\PAL.BAT
  *   thumb = /sdcard/menu/pal_thumb.raw
+ *   Mouse = 1
+ *   A = Enter
+ *   Up = Up
  *
  * `cmd` is typed once DOS shows its prompt (Enter is appended). Missing
- * file = the two built-in entries below. */
+ * file = the two built-in entries below. Gamepad keys not named in a
+ * section keep their defaults (see gamepad_default_config). */
 #define MAX_GAMES 16
 
 struct game_entry {
 	char title[32];
 	char cmd[96];
 	char thumb[96];
+	struct gamepad_config pad;
 };
 
 static struct game_entry games[MAX_GAMES];
@@ -47,9 +55,21 @@ static int ngames;
 /* Selected entry; read by pc_main(). */
 int boot_choice = 0;
 
+static struct gamepad_settings pad_settings;
+
 const char *boot_menu_cmd(int idx)
 {
 	return (idx >= 0 && idx < ngames) ? games[idx].cmd : NULL;
+}
+
+const struct gamepad_config *boot_menu_gamepad_config(int idx)
+{
+	return (idx >= 0 && idx < ngames) ? &games[idx].pad : NULL;
+}
+
+const struct gamepad_settings *boot_menu_gamepad_settings(void)
+{
+	return &pad_settings;
 }
 
 static const char *TAG = "bootmenu";
@@ -86,12 +106,31 @@ static void add_cmd_enter(struct game_entry *g)
 	}
 }
 
+static void set_mouse_button(int *slot, const char *value)
+{
+	int btn = gamepad_button_index(value);
+
+	if (btn >= 0)
+		*slot = btn;
+	else if (!strcasecmp(value, "none"))
+		*slot = -1;
+	else
+		ESP_LOGW(TAG, "gamepad: unknown button '%s'", value);
+}
+
 static int menu_ini_handler(void *user, const char *section, const char *name,
 			    const char *value)
 {
 	int idx = -1;
 
 	(void) user;
+	if (!strcasecmp(section, "gamepad")) {
+		if (!strcasecmp(name, "invertx"))
+			pad_settings.invert_x = atoi(value) != 0;
+		else if (!strcasecmp(name, "inverty"))
+			pad_settings.invert_y = atoi(value) != 0;
+		return 1;
+	}
 	if (sscanf(section, "game%d", &idx) != 1 || idx < 1 ||
 	    idx > MAX_GAMES)
 		return 1;
@@ -102,6 +141,25 @@ static int menu_ini_handler(void *user, const char *section, const char *name,
 		snprintf(g->cmd, sizeof(g->cmd), "%s", value);
 	else if (!strcmp(name, "thumb"))
 		snprintf(g->thumb, sizeof(g->thumb), "%s", value);
+	else if (!strcasecmp(name, "mouse"))
+		g->pad.mouse = atoi(value) != 0;
+	else if (!strcasecmp(name, "mousel"))
+		set_mouse_button(&g->pad.mouse_l, value);
+	else if (!strcasecmp(name, "mouser"))
+		set_mouse_button(&g->pad.mouse_r, value);
+	else {
+		int btn = gamepad_button_index(name);
+
+		if (btn >= 0) {
+			int code = gamepad_parse_key(value);
+
+			if (code >= 0)
+				g->pad.key[btn] = code;
+			else
+				ESP_LOGW(TAG, "%s: unknown key '%s'", section,
+					 value);
+		}
+	}
 	return 1;
 }
 
@@ -117,8 +175,13 @@ static void add_default(int *n, const char *title, const char *cmd,
 
 static void load_games(void)
 {
-	int parsed = ini_parse("/sdcard/menu.ini", menu_ini_handler, NULL);
 	int n = 0;
+
+	pad_settings = gamepad_default_settings();
+	for (int i = 0; i < MAX_GAMES; i++)
+		games[i].pad = gamepad_default_config();
+
+	int parsed = ini_parse("/sdcard/menu.ini", menu_ini_handler, NULL);
 
 	if (parsed == 0) {
 		for (int i = 0; i < MAX_GAMES; i++) {
@@ -287,6 +350,42 @@ static void stage_strip(void)
 	memcpy(staging, strip + (size_t) s * STRIP_H, WINDOW_PX * 2);
 	esp_lcd_panel_draw_bitmap(menu_panel, STRIP_Y, 0, STRIP_Y + STRIP_H,
 				  MENU_W, staging);
+}
+
+/* WiFi status strip under the subtitle.  Repainted in place every 500 ms;
+ * the full background is only sent once when the menu opens. */
+#define STATUS_Y 84
+#define STATUS_H 32
+
+static uint16_t *status_stage;
+static char status_last[128];
+
+static void draw_status_line(int force)
+{
+	char line[128];
+
+	if (!status_stage || !menu_fb)
+		return;
+	wifi_status_line(line, sizeof(line));
+	if (!force && !strcmp(line, status_last))
+		return;
+	snprintf(status_last, sizeof(status_last), "%s", line);
+
+	for (int y = STATUS_Y; y < STATUS_Y + STATUS_H; y++) {
+		int v = 8 + y / 24;
+		uint16_t c = (uint16_t) (v << 11) | (v << 6) | (v / 2);
+
+		for (int x = 0; x < MENU_W; x++)
+			menu_fb[x * MENU_H + y] = c;
+	}
+	draw_text_shadow(menu_fb, MENU_H, 16, STATUS_Y + 6, line, 1, 0xFFFF);
+
+	for (int x = 0; x < MENU_W; x++)
+		for (int y = STATUS_Y; y < STATUS_Y + STATUS_H; y++)
+			status_stage[(y - STATUS_Y) + x * STATUS_H] =
+				menu_fb[x * MENU_H + y];
+	esp_lcd_panel_draw_bitmap(menu_panel, STATUS_Y, 0,
+				  STATUS_Y + STATUS_H, MENU_W, status_stage);
 }
 
 static void draw_background(void)
@@ -475,6 +574,10 @@ int boot_menu(esp_lcd_panel_handle_t panel)
 	if (esp_lcd_dpi_panel_get_frame_buffer(panel, 1, (void **) &menu_fb)
 	    != ESP_OK || !menu_fb)
 		return 0;
+	status_stage = heap_caps_aligned_alloc(128,
+					       (size_t) MENU_W * STATUS_H * 2,
+					       MALLOC_CAP_SPIRAM |
+					       MALLOC_CAP_8BIT);
 	if (touch_init() != ESP_OK) {
 		ESP_LOGE(TAG, "GT911 init failed, booting the first game");
 		return 0;
@@ -485,15 +588,44 @@ int boot_menu(esp_lcd_panel_handle_t panel)
 	draw_background();
 	ESP_LOGI(TAG, "menu ready (%d games, strip %d)", ngames, strip_w);
 	stage_strip();
+	draw_status_line(1);
+	gamepad_set_settings(boot_menu_gamepad_settings());
+	gamepad_menu_ready();
 
 	int active = 0, start_x = 0, start_scroll = 0, last_x = 0, last_y = 0;
 	int moved = 0;
 	int64_t start_t = 0;
+	int64_t next_status = esp_timer_get_time() + 500000;
 
 	for (;;) {
 		uint16_t rx = 0, ry = 0, strength[1];
 		uint8_t cnt = 0;
 		int lx, ly;
+		int ev;
+
+		if (esp_timer_get_time() >= next_status) {
+			draw_status_line(0);
+			next_status = esp_timer_get_time() + 500000;
+		}
+		while ((ev = gamepad_menu_poll()) != 0) {
+			int idx = nearest_card();
+
+			if (ev == GAMEPAD_MENU_LEFT) {
+				if (idx > 0)
+					idx--;
+				animate_to(snap_target(idx));
+			} else if (ev == GAMEPAD_MENU_RIGHT) {
+				if (idx + 1 < ngames)
+					idx++;
+				animate_to(snap_target(idx));
+			} else if (ev == GAMEPAD_MENU_START) {
+				idx = nearest_card();
+				animate_to(snap_target(idx));
+				ESP_LOGI(TAG, "gamepad start -> %d", idx);
+				vTaskDelay(pdMS_TO_TICKS(150));
+				return idx;
+			}
+		}
 
 		esp_lcd_touch_read_data(tp);
 		int down = esp_lcd_touch_get_coordinates(tp, &rx, &ry, strength,

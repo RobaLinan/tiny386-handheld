@@ -198,6 +198,20 @@ P4-specific notes:
   panel with the PPA scaler. The PPA scale step is 1/16, so the 640→800 stretch
   is 1.1875 (475 of 480 columns), leaving a few black columns at the right edge.
 - The SD card holds `bios.bin`, `vgabios.bin`, `tiny386.ini` and the disk images.
+- At boot, a missing `cdb = /sdcard/paldos.iso` is inserted into `[pc]`;
+  every other key and comment is left untouched, and the pre-edit file is
+  saved as `tiny386.cdb.bak`.
+- While the boot menu is visible, a small file console is available on
+  USB-Serial/JTAG. From the host run `tools/sdctl.py ls /`,
+  `tools/sdctl.py get /tiny386.ini tiny386.ini`,
+  `tools/sdctl.py put tiny386.ini /tiny386.ini`, or `cat`/`rm`/`free`/
+  `reboot`. The console is stopped when a game starts, so edit at the menu
+  and reboot to apply. Close `idf.py monitor` first (the script needs the
+  port); it needs `pyserial`.
+- The WiFi web-UI code is present but disabled (`web = 0` in `[esp]`) on
+  this board: the ESP32-C6 hosted link passes ARP/DHCP but not unicast
+  ICMP/TCP, so the AP starts but `http://192.168.4.1` is unreachable.
+  Set `web = 1` only after fixing the C6/host data path.
 - A small `N FPS` counter is drawn in the top-left corner of the picture
   (LCD_FPS_OVERLAY), updated once per second.
 - In game, a vertical swipe on the right half of the screen changes the volume
@@ -210,6 +224,18 @@ P4-specific notes:
 - Touch boot menu (GT911 on I2C0, SDA 7/SCL 8): choose PAL or FD2. Once DOS
   shows `C:\>`, the firmware types `D:\PAL.BAT` or `D:\FD2` for the selected
   game. Those batch files live on the games disk image.
+- Gamepad: the 3x4 matrix (Up/Down/Left/Right, A/B/C/D, Select/OK/L2/R2) and
+  the analog stick feed the PS/2 keyboard. Defaults are D-pad and stick =
+  arrow keys, A = Enter, B = Esc, C = Space, D = Ctrl, Select = F1,
+  OK = Enter, L2 = Shift, R2 = Tab. Holding a key repeats it. With
+  `Mouse = 1` the stick moves the PS/2 mouse instead; `MouseL`/`MouseR`
+  choose the click buttons (default OK/L2, which then stop sending their
+  keyboard key), and the D-pad still sends arrows.
+  The schematic labels A/B/X/Y, where X/Y are C/D here.
+  In the boot menu, D-pad left/right or the stick's left/right scrolls the
+  cards, and any action button starts the centered game; touch still works.
+  The stick uses a 200-count radial deadzone and per-direction full-scale
+  calibration, so both halves reach full travel.
 - The game list comes from `/sdcard/menu.ini` (built-in PAL/FD2 entries are
   used when the file is missing):
 
@@ -218,15 +244,40 @@ P4-specific notes:
   title = PAL
   cmd = D:\PAL.BAT
   thumb = /sdcard/menu/pal_thumb.raw
+  ; gamepad overrides; every entry is optional and defaults to these values
+  ; Mouse = 0
+  ; Up = Up
+  ; Down = Down
+  ; Left = Left
+  ; Right = Right
+  ; A = Enter
+  ; B = Esc
+  ; C = Space
+  ; D = Ctrl
+  ; Select = F1
+  ; OK = Enter
+  ; L2 = Shift
+  ; R2 = Tab
+  ; MouseL = OK
+  ; MouseR = L2
 
   [game2]
   title = FD2
   cmd = D:\FD2
   thumb = /sdcard/menu/fd2_thumb.raw
+
+  [gamepad]
+  ; this PCB's X axis is inverted; Y is normal (set 0/1 to flip)
+  ; InvertX = 1
+  ; InvertY = 0
   ```
 
   `cmd` is typed once DOS shows its prompt (Enter is appended). Adding a game
-  needs one `[gameN]` block plus a thumbnail; no firmware change.
+  needs one `[gameN]` block plus a thumbnail; no firmware change. Key values
+  accept `Enter`, `Esc`, `Space`, `Ctrl`, `Shift`, `Alt`, `Tab`, `F1`-`F12`,
+  letters/digits, `Up`/`Down`/`Left`/`Right`, `Home`/`End`/`PgUp`/`PgDn`/
+  `Ins`/`Del`, punctuation, `None`, or a raw PS/2 set-1 scancode (`0x1C`).
+  Alongside C/D, the schematic names X/Y and L1/R1 are accepted.
 - Each card shows the title over a scaled thumbnail. Each card shows the title above a scaled
   thumbnail; the cards scroll horizontally with drag, fling and snap. The
   strip is pre-rendered in PSRAM once, so a scroll frame is a single DMA

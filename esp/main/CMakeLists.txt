@@ -24,6 +24,8 @@ idf_component_register(SRCS "esp_main.c"
 "../../sb16.c"
 "../../pcspk.c"
 "wifi.c"
+"websrv.c"
+"sdcli.c"
 "lcd_axs15231b.c"
 "lcd_st7701.c"
 "lcd_elecrow7s3.c"
@@ -36,10 +38,14 @@ idf_component_register(SRCS "esp_main.c"
 "usb_hid.c"
 "usb_input.c"
 "boot_menu.c"
+"gamepad.c"
+"battery.c"
+"board_adc.c"
 INCLUDE_DIRS "")
 
 target_add_binary_data(${COMPONENT_LIB} "fb_bios.bin" BINARY)
 target_add_binary_data(${COMPONENT_LIB} "fb_vga.bin" BINARY)
+target_add_binary_data(${COMPONENT_LIB} "web/index.html" BINARY RENAME_TO web_index_html)
 
 # Boards whose app partition cannot hold the 2.65MB built-in DOS disk
 # (4MB-flash S3, 1792K app on P4) load disks from SD only. fb_dos.img

@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Tiny386 SD</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;font:14px system-ui,-apple-system,"Segoe UI",sans-serif;background:#0b1020;color:#e8ecf8}
+header{display:flex;gap:10px;align-items:center;padding:10px 14px;background:#141c34;position:sticky;top:0;z-index:2}
+header b{font-size:16px;letter-spacing:.5px}
+#stat{margin-left:auto;color:#9fb0d0;font-size:12px;text-align:right;line-height:1.35;min-width:0;max-width:58vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+button{background:#2a3a66;color:#e8ecf8;border:1px solid #3b4f88;border-radius:6px;padding:6px 10px;font:inherit;cursor:pointer}
+button:active{background:#38508f}
+button.danger{background:#5a2430;border-color:#8a3345}
+main{max-width:980px;margin:0 auto;padding:12px 14px 40px}
+#pathbar{display:flex;gap:8px;align-items:center;padding:8px 0;font-family:ui-monospace,monospace;overflow-wrap:anywhere}
+#drop{border:1px dashed #3b4f88;border-radius:8px;padding:14px;text-align:center;color:#9fb0d0;background:#101830;margin:8px 0}
+#drop.hover{border-color:#6c8cff;background:#16224a}
+table{width:100%;border-collapse:collapse}
+th,td{padding:8px 6px;border-bottom:1px solid #1e2946;text-align:left;vertical-align:middle}
+th{color:#9fb0d0;font-weight:500;font-size:12px}
+td.name{font-family:ui-monospace,monospace;overflow-wrap:anywhere}
+td.size{white-space:nowrap;color:#9fb0d0;text-align:right;font-variant-numeric:tabular-nums}
+td.act{white-space:nowrap;text-align:right}
+td.act button{padding:4px 8px;margin-left:4px;font-size:12px}
+#prog{width:100%;height:10px;margin:8px 0;display:none}
+#msg{min-height:20px;color:#9fb0d0;font-size:12px;margin:6px 0}
+#editor{position:fixed;inset:0;background:#000b;display:none;align-items:center;justify-content:center;padding:12px;z-index:5}
+#panel{background:#101830;border:1px solid #3b4f88;border-radius:10px;width:min(900px,100%);height:min(80vh,700px);display:flex;flex-direction:column;overflow:hidden}
+#panel header{position:static;background:#141c34;padding:8px 12px}
+#ta{flex:1;margin:10px;background:#0b1020;color:#e8ecf8;border:1px solid #2a3a66;border-radius:6px;padding:10px;font:13px/1.45 ui-monospace,monospace;resize:none}
+#panel footer{display:flex;gap:8px;justify-content:flex-end;align-items:center;padding:0 10px 10px}
+small{color:#9fb0d0}
+</style>
+</head>
+<body>
+<header>
+  <b>TINY386 SD</b>
+  <div id="stat">连接中...</div>
+  <button id="reboot" class="danger">重启</button>
+</header>
+<main>
+  <div id="pathbar"><button id="up">上一级</button><span id="path">/</span></div>
+  <div id="drop">拖文件到这里，或 <button id="pick">选择文件</button><input id="file" type="file" multiple hidden></div>
+  <progress id="prog" value="0" max="100"></progress>
+  <div id="msg"></div>
+  <table>
+    <thead><tr><th>名称</th><th class="size">大小</th><th class="act">操作</th></tr></thead>
+    <tbody id="list"></tbody>
+  </table>
+</main>
+<div id="editor"><div id="panel">
+  <header style="display:flex;align-items:center;gap:10px"><b id="ename"></b><span style="margin-left:auto"><button id="close">关闭</button></span></header>
+  <textarea id="ta" spellcheck="false"></textarea>
+  <footer><small id="ehint"></small><button id="save">保存</button></footer>
+</div></div>
+<script>
+const $ = id => document.getElementById(id);
+let path = '/';
+let entries = [];
+let editing = null;
+let uploading = false;
+const TEXT_EXT = /\.(ini|txt|bat|cfg|log|md|json)$/i;
+
+function enc(p) {
+  return p.split('/').map(encodeURIComponent).join('/');
+}
+function fmt(n) {
+  if (n < 1024) return n + ' B';
+  const u = ['K', 'M', 'G'];
+  let i = -1;
+  while (n >= 1024 && i < 2) { n /= 1024; i++; }
+  return n.toFixed(n < 10 ? 1 : 0) + ' ' + u[i] + 'B';
+}
+function join(dir, name) { return (dir === '/' ? '' : dir) + '/' + name; }
+function isText(name) { return TEXT_EXT.test(name); }
+
+async function req(url, opt) {
+  const r = await fetch(url, opt);
+  if (!r.ok) {
+    let t = '';
+    try { t = await r.text(); } catch (e) {}
+    throw new Error(t.trim() || ('HTTP ' + r.status));
+  }
+  return r;
+}
+
+async function status() {
+  if (uploading) return;
+  try {
+    const j = await (await req('/api/status')).json();
+    $('stat').textContent = (j.wifi || '') + ' · 空闲 ' + fmt(j.free) +
+      ' / ' + fmt(j.total) + (j.writable ? '' : ' · 只读');
+  } catch (e) {
+    $('stat').textContent = '离线';
+  }
+}
+
+async function refresh() {
+  try {
+    const j = await (await req('/api/list?path=' + enc(path))).json();
+    entries = j.entries || [];
+    $('path').textContent = path;
+    render();
+    $('msg').textContent = '';
+  } catch (e) {
+    $('msg').textContent = '读取失败: ' + e.message;
+  }
+  status();
+}
+
+function render() {
+  entries.sort((a, b) => (b.dir - a.dir) || a.name.localeCompare(b.name));
+  const tb = $('list');
+  tb.textContent = '';
+  for (const e of entries) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.className = 'name';
+    const a = document.createElement('a');
+    a.href = '#';
+    a.textContent = e.name + (e.dir ? '/' : '');
+    a.style.color = e.dir ? '#8fb4ff' : '#e8ecf8';
+    a.style.textDecoration = 'none';
+    a.onclick = () => {
+      if (e.dir) { path = join(path, e.name); refresh(); }
+      else if (isText(e.name)) edit(e);
+    };
+    td.appendChild(a);
+    tr.appendChild(td);
+
+    const sz = document.createElement('td');
+    sz.className = 'size';
+    sz.textContent = e.dir ? '—' : fmt(e.size);
+    tr.appendChild(sz);
+
+    const ac = document.createElement('td');
+    ac.className = 'act';
+    if (!e.dir) {
+      const dl = document.createElement('button');
+      dl.textContent = '下载';
+      dl.onclick = () => { location.href = '/api/download?path=' + enc(join(path, e.name)); };
+      ac.appendChild(dl);
+      if (isText(e.name)) {
+        const ed = document.createElement('button');
+        ed.textContent = '编辑';
+        ed.onclick = () => edit(e);
+        ac.appendChild(ed);
+      }
+    }
+    const del = document.createElement('button');
+    del.className = 'danger';
+    del.textContent = '删除';
+    del.onclick = async () => {
+      if (!confirm('删除 ' + e.name + ' ?')) return;
+      try {
+        await req('/api/delete?path=' + enc(join(path, e.name)), { method: 'DELETE' });
+        $('msg').textContent = '已删除';
+        refresh();
+      } catch (err) {
+        $('msg').textContent = '删除失败: ' + err.message;
+      }
+    };
+    ac.appendChild(del);
+    tr.appendChild(ac);
+    tb.appendChild(tr);
+  }
+}
+
+async function edit(e) {
+  const p = join(path, e.name);
+  try {
+    const r = await req('/api/download?path=' + enc(p) + '&text=1');
+    const t = await r.text();
+    editing = p;
+    $('ename').textContent = p;
+    $('ta').value = t;
+    $('ehint').textContent = '保存后重启生效';
+    $('editor').style.display = 'flex';
+  } catch (err) {
+    $('msg').textContent = '打开失败: ' + err.message;
+  }
+}
+
+async function save() {
+  if (!editing) return;
+  try {
+    await req('/api/upload?path=' + enc(editing), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      body: $('ta').value
+    });
+    $('msg').textContent = '已保存，重启后生效';
+    $('editor').style.display = 'none';
+    editing = null;
+    refresh();
+  } catch (err) {
+    alert('保存失败: ' + err.message);
+  }
+}
+
+function uploadOne(file) {
+  const p = join(path, file.name);
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('PUT', '/api/upload?path=' + enc(p));
+    x.upload.onprogress = e => {
+      if (e.lengthComputable) {
+        $('prog').style.display = 'block';
+        $('prog').value = Math.round(e.loaded * 100 / e.total);
+      }
+    };
+    x.onload = () => {
+      $('prog').style.display = 'none';
+      if (x.status >= 200 && x.status < 300) resolve();
+      else reject(new Error(x.responseText || ('HTTP ' + x.status)));
+    };
+    x.onerror = () => {
+      $('prog').style.display = 'none';
+      reject(new Error('网络错误'));
+    };
+    x.send(file);
+  });
+}
+
+async function uploadFiles(files) {
+  uploading = true;
+  for (const f of files) {
+    try {
+      $('msg').textContent = '上传 ' + f.name + ' ...';
+      await uploadOne(f);
+      $('msg').textContent = '已上传 ' + f.name + (isText(f.name) ? '（重启后生效）' : '');
+    } catch (e) {
+      $('msg').textContent = '上传失败 ' + f.name + ': ' + e.message;
+      break;
+    }
+  }
+  uploading = false;
+  refresh();
+}
+
+$('up').onclick = () => {
+  if (path !== '/') {
+    path = path.replace(/\/[^\/]+$/, '') || '/';
+    refresh();
+  }
+};
+$('pick').onclick = () => $('file').click();
+$('file').onchange = e => {
+  if (e.target.files.length) uploadFiles([...e.target.files]);
+  e.target.value = '';
+};
+const dz = $('drop');
+dz.ondragover = e => { e.preventDefault(); dz.classList.add('hover'); };
+dz.ondragleave = () => dz.classList.remove('hover');
+dz.ondrop = e => {
+  e.preventDefault();
+  dz.classList.remove('hover');
+  if (e.dataTransfer.files.length) uploadFiles([...e.dataTransfer.files]);
+};
+$('reboot').onclick = async () => {
+  if (!confirm('重启设备？')) return;
+  try { await fetch('/api/reboot', { method: 'POST' }); } catch (e) {}
+  $('msg').textContent = '重启中，请稍后重新连接...';
+};
+$('close').onclick = () => { $('editor').style.display = 'none'; editing = null; };
+$('save').onclick = save;
+refresh();
+setInterval(status, 5000);
+</script>
+</body>
+</html>

@@ -38,6 +38,7 @@
 //#include "bsp/esp-bsp.h"
 
 #include "common.h"
+#include "wifi.h"
 #include "esp_cache.h"
 #include "../../pc.h"
 #include "../../term.h"
@@ -455,7 +456,11 @@ void vga_task(void *arg)
 	lcd_fill_init(panel);
 #endif
 #ifdef BOOT_MENU
+	wifi_menu_start();
 	boot_choice = boot_menu(panel);
+	/* WiFi is a boot-menu-only service: the C6 costs power and internal
+	 * RAM the emulator wants back once a game starts. */
+	wifi_menu_stop();
 	boot_menu_start_gestures();
 	/* Drop any menu leftovers so nothing blinks through the first frames. */
 #ifdef LCD_FILL_DIRECT
