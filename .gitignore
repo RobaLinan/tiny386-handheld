@@ -2,6 +2,7 @@
 *.o
 *.d
 .depends
+.fast-n
 out/
 tiny386
 tiny386.exe
