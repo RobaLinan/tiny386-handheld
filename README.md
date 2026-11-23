@@ -173,6 +173,9 @@ with bare-metal ESP32 handheld ports added for running MS-DOS games from an SD c
 | `xiao` | ESP32-S3 | serial terminal | bench/debug |
 | `jc3248w535`, `elecrow7s3` | ESP32-S3 | esp_lcd panels | upstream boards |
 
+The carrier PCB (3x4 key matrix + joystick header), the full P1/JP1 pinout and
+the FreeCAD/3MF case are in [hardware/README.md](hardware/README.md).
+
 Build (ESP32-P4, ESP-IDF 6.0):
 
 ```sh
@@ -224,18 +227,29 @@ P4-specific notes:
 - Touch boot menu (GT911 on I2C0, SDA 7/SCL 8): choose PAL or FD2. Once DOS
   shows `C:\>`, the firmware types `D:\PAL.BAT` or `D:\FD2` for the selected
   game. Those batch files live on the games disk image.
-- Gamepad: the 3x4 matrix (Up/Down/Left/Right, A/B/C/D, Select/OK/L2/R2) and
-  the analog stick feed the PS/2 keyboard. Defaults are D-pad and stick =
-  arrow keys, A = Enter, B = Esc, C = Space, D = Ctrl, Select = F1,
+- Power and battery: a 1S Li-ion feeds the IP5306 charger + 5V boost. The third
+  key (SW3, IP5306 KEY) is the power key: short press on, hold ~10 s off; any
+  USB connection keeps the board powered, so unplug both Type-C ports first.
+  `battery.c` samples a 10k/10k divider on GPIO51/ADC2_CH2 and draws the charge
+  percentage at the top-right of the picture (green >= 50%, yellow 20-49%,
+  red < 20%).
+- Gamepad: the 3x4 matrix (Up/Down/Left/Right, A/B/C/D, Select/OK/L2/R2) and a
+  M5Stack Unit Joystick2 hall-effect stick feed the PS/2 keyboard. The stick is
+  an I2C device (`0x63`) on the shared ES8311/GT911 bus, wired to P1 pin 23
+  (SDA/GPIO7) and pin 25 (SCL/GPIO8) and powered from 5V; pinout and carrier
+  PCB are in [hardware/README.md](hardware/README.md). Defaults are D-pad and
+  stick = arrow keys, A = Enter, B = Esc, C = Space, D = Ctrl, Select = F1,
   OK = Enter, L2 = Shift, R2 = Tab. Holding a key repeats it. With
   `Mouse = 1` the stick moves the PS/2 mouse instead; `MouseL`/`MouseR`
   choose the click buttons (default OK/L2, which then stop sending their
-  keyboard key), and the D-pad still sends arrows.
+  keyboard key), and the D-pad still sends arrows. With `ShopCycle = 1`,
+  holding the stick button walks through Shift/Ctrl/Alt + F1..F10 (~200 ms per
+  combo) for keyboard-only hidden shops.
   The schematic labels A/B/X/Y, where X/Y are C/D here.
   In the boot menu, D-pad left/right or the stick's left/right scrolls the
   cards, and any action button starts the centered game; touch still works.
-  The stick uses a 200-count radial deadzone and per-direction full-scale
-  calibration, so both halves reach full travel.
+  The stick uses a 4% radial deadzone with the module's factory 12-bit
+  calibration (raw 16-bit readout fallback).
 - The game list comes from `/sdcard/menu.ini` (built-in PAL/FD2 entries are
   used when the file is missing):
 
@@ -246,6 +260,7 @@ P4-specific notes:
   thumb = /sdcard/menu/pal_thumb.raw
   ; gamepad overrides; every entry is optional and defaults to these values
   ; Mouse = 0
+  ; ShopCycle = 0
   ; Up = Up
   ; Down = Down
   ; Left = Left
@@ -267,8 +282,8 @@ P4-specific notes:
   thumb = /sdcard/menu/fd2_thumb.raw
 
   [gamepad]
-  ; this PCB's X axis is inverted; Y is normal (set 0/1 to flip)
-  ; InvertX = 1
+  ; Unit Joystick2 reads 0/0 on this board; set 1 to flip an axis
+  ; InvertX = 0
   ; InvertY = 0
   ```
 
@@ -278,8 +293,11 @@ P4-specific notes:
   letters/digits, `Up`/`Down`/`Left`/`Right`, `Home`/`End`/`PgUp`/`PgDn`/
   `Ins`/`Del`, punctuation, `None`, or a raw PS/2 set-1 scancode (`0x1C`).
   Alongside C/D, the schematic names X/Y and L1/R1 are accepted.
-- Each card shows the title over a scaled thumbnail. Each card shows the title above a scaled
-  thumbnail; the cards scroll horizontally with drag, fling and snap. The
+  `ShopCycle = 1` makes the stick's push button walk through
+  Shift+F1..F10, Ctrl+F1..F10 then Alt+F1..F10 while held (release stops it);
+  per-game key remaps and `Mouse = 1` work as usual.
+- Each card shows the title above a scaled thumbnail; the cards scroll
+  horizontally with drag, fling and snap. The
   strip is pre-rendered in PSRAM once, so a scroll frame is a single DMA
   blit and stays smooth with many games. Put a 380x214 RGB565 thumbnail at
   `/sdcard/menu/<name>_thumb.raw`, written by `scripts/menu_bg.py <image>
