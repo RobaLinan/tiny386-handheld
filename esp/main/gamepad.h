@@ -18,7 +18,8 @@ enum pad_button {
 };
 
 struct gamepad_config {
-	int mouse;                 /* 1: the analog stick drives the PS/2 mouse */
+	int mouse;                 /* 1: the stick drives the PS/2 mouse */
+	int shop_cycle;            /* 1: the stick button cycles modifier+F1..F10 */
 	int key[PAD_BUTTON_COUNT]; /* PS/2 set-1 scancode, 0 = unmapped */
 	int mouse_l;               /* PAD_* used as left click, -1 = none */
 	int mouse_r;

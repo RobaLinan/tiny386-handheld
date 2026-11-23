@@ -10,6 +10,8 @@
  *
  * Buttons send PS/2 set-1 scancodes; the stick sends the configured arrow
  * keys or, with Mouse=1, PS/2 mouse motion. Mapping comes from menu.ini.
+ * With ShopCycle=1 the stick button walks through Shift/Ctrl/Alt+F1..F10
+ * while held, for games with keyboard-only hidden shops.
  */
 
 #include <ctype.h>
@@ -32,6 +34,7 @@ struct gamepad_config gamepad_default_config(void)
 {
 	struct gamepad_config c = {
 		.mouse = 0,
+		.shop_cycle = 0,
 		.key = {
 			[PAD_UP] = 0xE048,
 			[PAD_DOWN] = 0xE050,
@@ -180,6 +183,7 @@ int gamepad_button_index(const char *name)
 #define JOY_I2C_HZ 400000
 #define JOY_I2C_HZ_SLOW 100000
 #define JOY_REG_RAW 0x00
+#define JOY_REG_BTN 0x20       /* 1 byte, 0 = stick pressed */
 #define JOY_REG_OFFSET 0x50
 #define JOY_REG_FW 0xFE
 #define JOY_RAW_12BIT_MAX 4095
@@ -192,6 +196,16 @@ int gamepad_button_index(const char *name)
 #define POLL_MS 10
 #define STABLE_N 3
 #define SETTLE_US 200
+
+/* Hidden-shop helper: holding the stick button walks through
+ * {Shift,Ctrl,Alt} x F1..F10.  A release stops after releasing the
+ * keys that are currently down. */
+#define SHOP_BTN_STABLE 3
+#define SHOP_MOD_LEAD_US 20000
+#define SHOP_KEY_HOLD_US 80000
+#define SHOP_GAP_US 120000
+#define SHOP_FKEY_FIRST 0x3B
+#define SHOP_COMBO_N 30
 
 #define REPEAT_DELAY_US 500000
 #define REPEAT_RATE_US 80000
@@ -255,6 +269,23 @@ static int joy_cx, joy_cy;
 static int joy_max = JOY_RAW_12BIT_MAX;
 static int joy_deadzone = JOY_RAW_12BIT_MAX * JOY_DEADZONE_PCT / 100;
 static int64_t joy_log_us;
+
+enum shop_state {
+	SHOP_IDLE,
+	SHOP_WAIT_KEY,
+	SHOP_HOLD_KEY,
+	SHOP_GAP,
+};
+
+static const int shop_mod_code[3] = { 0x2A, 0x1D, 0x38 };
+static const char *const shop_mod_name[3] = { "shift", "ctrl", "alt" };
+
+static bool shop_btn_stable;
+static uint8_t shop_btn_debounce;
+static int shop_state;
+static int shop_combo;
+static int shop_mod, shop_key;
+static int64_t shop_next_us;
 
 #ifdef BOOT_MENU
 extern int boot_choice;
@@ -326,6 +357,15 @@ static bool joy_read(int *x, int *y)
 	*x = buf[0] | (buf[1] << 8);
 	*y = buf[2] | (buf[3] << 8);
 	return true;
+}
+
+static bool joy_button_read(void)
+{
+	uint8_t v;
+
+	if (!joy_i2c_read(JOY_REG_BTN, &v, 1))
+		return false;
+	return v == 0;
 }
 
 static void joy_log_offset(void)
@@ -408,6 +448,8 @@ static bool joy_open(int hz)
 
 static bool joy_init(void)
 {
+	uint8_t btn = 0xFF;
+
 	if (!joy_open(JOY_I2C_HZ)) {
 		ESP_LOGW(TAG, "joystick silent at %d Hz, retrying at %d Hz",
 			 JOY_I2C_HZ, JOY_I2C_HZ_SLOW);
@@ -417,7 +459,13 @@ static bool joy_init(void)
 			return false;
 		}
 	}
-	return joy_calibrate();
+	if (!joy_calibrate())
+		return false;
+	if (joy_i2c_read(JOY_REG_BTN, &btn, 1))
+		ESP_LOGI(TAG, "stick button register %u (0=pressed)", btn);
+	else
+		ESP_LOGW(TAG, "stick button register unreadable");
+	return true;
 }
 
 static int source_key(int src)
@@ -504,6 +552,81 @@ static void repeat_keys(int64_t now)
 			continue;
 		ps2_put_keycode(kbd, 1, held[i].code);
 		held[i].repeat_at = now + REPEAT_RATE_US;
+	}
+}
+
+static void shop_begin(int64_t now)
+{
+	shop_mod = shop_mod_code[shop_combo / 10];
+	shop_key = SHOP_FKEY_FIRST + shop_combo % 10;
+	ps2_put_keycode(kbd, 1, shop_mod);
+	shop_state = SHOP_WAIT_KEY;
+	shop_next_us = now + SHOP_MOD_LEAD_US;
+}
+
+static void shop_cancel(void)
+{
+	if (shop_state == SHOP_IDLE)
+		return;
+	if (kbd) {
+		if (shop_state == SHOP_HOLD_KEY)
+			ps2_put_keycode(kbd, 0, shop_key);
+		if (shop_state != SHOP_GAP)
+			ps2_put_keycode(kbd, 0, shop_mod);
+	}
+	shop_state = SHOP_IDLE;
+}
+
+static void shop_cycle_tick(int64_t now)
+{
+	bool raw;
+
+	if (!cfg.shop_cycle) {
+		shop_cancel();
+		shop_btn_stable = false;
+		shop_btn_debounce = 0;
+		return;
+	}
+
+	raw = joy_button_read();
+	if (raw == shop_btn_stable) {
+		shop_btn_debounce = 0;
+	} else if (++shop_btn_debounce >= SHOP_BTN_STABLE) {
+		shop_btn_debounce = 0;
+		shop_btn_stable = raw;
+		if (!raw) {
+			shop_cancel();
+		} else if (input_enabled && kbd) {
+			shop_combo = 0;
+			shop_begin(now);
+		}
+	}
+
+	if (shop_state == SHOP_IDLE || now < shop_next_us)
+		return;
+
+	switch (shop_state) {
+	case SHOP_WAIT_KEY:
+		ps2_put_keycode(kbd, 1, shop_key);
+		shop_state = SHOP_HOLD_KEY;
+		shop_next_us = now + SHOP_KEY_HOLD_US;
+		ESP_LOGI(TAG, "shop combo %d/%d %s+F%d",
+			 shop_combo + 1, SHOP_COMBO_N,
+			 shop_mod_name[shop_combo / 10],
+			 shop_combo % 10 + 1);
+		break;
+	case SHOP_HOLD_KEY:
+		ps2_put_keycode(kbd, 0, shop_key);
+		ps2_put_keycode(kbd, 0, shop_mod);
+		shop_state = SHOP_GAP;
+		shop_next_us = now + SHOP_GAP_US;
+		break;
+	case SHOP_GAP:
+		shop_combo = (shop_combo + 1) % SHOP_COMBO_N;
+		shop_begin(now);
+		break;
+	default:
+		break;
 	}
 }
 
@@ -678,9 +801,10 @@ static void load_config(void)
 	if (s)
 		cfg_settings = *s;
 #endif
-	ESP_LOGI(TAG, "mouse=%d invert=%d/%d keys %04X %04X %04X %04X "
+	ESP_LOGI(TAG, "mouse=%d shop=%d invert=%d/%d keys %04X %04X %04X %04X "
 		      "%02X %02X %02X %02X %02X %02X %02X %02X",
-		 cfg.mouse, cfg_settings.invert_x, cfg_settings.invert_y,
+		 cfg.mouse, cfg.shop_cycle, cfg_settings.invert_x,
+		 cfg_settings.invert_y,
 		 cfg.key[PAD_UP], cfg.key[PAD_DOWN], cfg.key[PAD_LEFT],
 		 cfg.key[PAD_RIGHT], cfg.key[PAD_A], cfg.key[PAD_B],
 		 cfg.key[PAD_C], cfg.key[PAD_D], cfg.key[PAD_SELECT],
@@ -778,6 +902,7 @@ static void gamepad_task(void *arg)
 
 		if (menu_mode) {
 			menu_tick(want, now);
+			shop_cancel();
 			vTaskDelay(pdMS_TO_TICKS(POLL_MS));
 			continue;
 		}
@@ -792,6 +917,7 @@ static void gamepad_task(void *arg)
 				input_enabled = true;
 			memset(pad_debounce, 0, sizeof(pad_debounce));
 			memset(stick_debounce, 0, sizeof(stick_debounce));
+			shop_cancel();
 			vTaskDelay(pdMS_TO_TICKS(POLL_MS));
 			continue;
 		}
@@ -812,6 +938,7 @@ static void gamepad_task(void *arg)
 
 		if (cfg.mouse)
 			mouse_tick(joy_ok, nx, ny, now);
+		shop_cycle_tick(now);
 		repeat_keys(now);
 		vTaskDelay(pdMS_TO_TICKS(POLL_MS));
 	}

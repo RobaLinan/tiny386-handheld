@@ -143,6 +143,8 @@ static int menu_ini_handler(void *user, const char *section, const char *name,
 		snprintf(g->thumb, sizeof(g->thumb), "%s", value);
 	else if (!strcasecmp(name, "mouse"))
 		g->pad.mouse = atoi(value) != 0;
+	else if (!strcasecmp(name, "shopcycle"))
+		g->pad.shop_cycle = atoi(value) != 0;
 	else if (!strcasecmp(name, "mousel"))
 		set_mouse_button(&g->pad.mouse_l, value);
 	else if (!strcasecmp(name, "mouser"))
