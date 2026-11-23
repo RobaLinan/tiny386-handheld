@@ -15,7 +15,7 @@
 #define LCD_FPS_OVERLAY
 #define BOOT_MENU
 
-/* 3x4 key matrix + analog stick on the handheld PCB. */
+/* 3x4 key matrix + M5 Unit Joystick2 (I2C 0x63) on the handheld PCB. */
 #define USE_GAMEPAD
 
 /* Battery divider node: JP1 pin 9, BAT+ --10k--+--10k-- GND. */

@@ -6,7 +6,7 @@
  *     Up   Down Left Right
  *     A    B    C    D
  *     Sel  OK   L2   R2
- * Analog stick on ADC2: X GPIO49, Y GPIO50.
+ * M5Stack Unit Joystick2 (hall effect) on the shared I2C bus, addr 0x63.
  *
  * Buttons send PS/2 set-1 scancodes; the stick sends the configured arrow
  * keys or, with Mouse=1, PS/2 mouse motion. Mapping comes from menu.ini.
@@ -55,8 +55,7 @@ struct gamepad_config gamepad_default_config(void)
 
 struct gamepad_settings gamepad_default_settings(void)
 {
-	/* X is electrically inverted; Y is wired normally. */
-	struct gamepad_settings s = { .invert_x = 1, .invert_y = 0 };
+	struct gamepad_settings s = { .invert_x = 0, .invert_y = 0 };
 
 	return s;
 }
@@ -164,38 +163,31 @@ int gamepad_button_index(const char *name)
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
-#include "esp_adc/adc_oneshot.h"
+#include "driver/i2c_master.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
 
 #include "common.h"
 #include "../../i8042.h"
-#include "board_adc.h"
 
 #define ROW_N 3
 #define COL_N 4
 
-#define JOY_X_GPIO 49
-#define JOY_Y_GPIO 50
-
-/* Replacement stick measured 2026-11-17. Center is the average of the
- * power-on rest (1618/1854) and the post-movement rest (1519/1690). */
-#define JOY_X_CENTER 1568
-#define JOY_Y_CENTER 1772
-#define JOY_X_MIN 375
-#define JOY_X_MAX 2825
-#define JOY_Y_MIN 532
-#define JOY_Y_MAX 2986
-#define JOY_DEADZONE 200       /* radial, raw counts */
+/* M5Stack Unit Joystick2: X/Y raw little-endian at 0x00, calibrated
+ * signed 12-bit offsets at 0x50, firmware version at 0xFE. */
+#define JOY_I2C_ADDR 0x63
+#define JOY_I2C_HZ 400000
+#define JOY_I2C_HZ_SLOW 100000
+#define JOY_REG_RAW 0x00
+#define JOY_REG_OFFSET 0x50
+#define JOY_REG_FW 0xFE
+#define JOY_RAW_12BIT_MAX 4095
+#define JOY_RAW_16BIT_MAX 65535
+#define JOY_DEADZONE_PCT 4     /* radial, percent of full scale */
 #define JOY_DIR_PRESS 120      /* normalized -1000..1000 */
 #define JOY_DIR_RELEASE 80
 #define MOUSE_MAX_STEP 10
-
-/* A disconnected stick leaves the ADC pins floating (~0.5 V), which looks
- * like a held direction. Only trust the stick once it sits near center. */
-#define JOY_REST_TOL 500       /* raw counts from the fixed center */
-#define JOY_REST_POLLS 100     /* 10 ms polls at rest before enabling */
 
 #define POLL_MS 10
 #define STABLE_N 3
@@ -257,12 +249,12 @@ struct held_key {
 
 static struct held_key held[MAX_HELD_KEYS];
 
-static adc_oneshot_unit_handle_t adc;
-static adc_channel_t joy_x_ch, joy_y_ch;
+static i2c_master_dev_handle_t joy_dev;
 static bool joy_ready;
-static bool joy_absent;
-static int joy_rest_polls;
 static int joy_cx, joy_cy;
+static int joy_max = JOY_RAW_12BIT_MAX;
+static int joy_deadzone = JOY_RAW_12BIT_MAX * JOY_DEADZONE_PCT / 100;
+static int64_t joy_log_us;
 
 #ifdef BOOT_MENU
 extern int boot_choice;
@@ -317,51 +309,40 @@ static void scan_matrix(uint8_t raw[ROW_N])
 		gpio_set_level(row_gpio[i], 0);
 }
 
+static bool joy_i2c_read(uint8_t reg, uint8_t *buf, size_t len)
+{
+	if (!joy_dev)
+		return false;
+	return i2c_master_transmit_receive(joy_dev, &reg, 1, buf, len, 50) ==
+	       ESP_OK;
+}
+
 static bool joy_read(int *x, int *y)
 {
-	int sx = 0, sy = 0;
+	uint8_t buf[4];
 
-	for (int i = 0; i < 4; i++) {
-		int rx, ry;
-
-		if (board_adc_read(adc, joy_x_ch, &rx) != ESP_OK ||
-		    board_adc_read(adc, joy_y_ch, &ry) != ESP_OK)
-			return false;
-		sx += rx;
-		sy += ry;
-	}
-	*x = sx / 4;
-	*y = sy / 4;
-	return true;
-}
-
-static bool joy_at_rest(int x, int y)
-{
-	return abs(x - joy_cx) <= JOY_REST_TOL &&
-	       abs(y - joy_cy) <= JOY_REST_TOL;
-}
-
-/* Returns true while the stick should be ignored. Re-enables after the
- * stick has stayed near center for a second (reconnected or released). */
-static bool joy_absent_check(int x, int y)
-{
-	if (!joy_absent)
+	if (!joy_i2c_read(JOY_REG_RAW, buf, sizeof(buf)))
 		return false;
-	if (joy_at_rest(x, y)) {
-		if (++joy_rest_polls >= JOY_REST_POLLS) {
-			joy_absent = false;
-			joy_rest_polls = 0;
-			ESP_LOGI(TAG, "stick at rest, enabled");
-		}
-	} else {
-		joy_rest_polls = 0;
-	}
+	*x = buf[0] | (buf[1] << 8);
+	*y = buf[2] | (buf[3] << 8);
 	return true;
+}
+
+static void joy_log_offset(void)
+{
+	uint8_t buf[4];
+	int16_t ox, oy;
+
+	if (!joy_i2c_read(JOY_REG_OFFSET, buf, sizeof(buf)))
+		return;
+	memcpy(&ox, buf, 2);
+	memcpy(&oy, buf + 2, 2);
+	ESP_LOGI(TAG, "module calibrated offset X=%d Y=%d", ox, oy);
 }
 
 static bool joy_calibrate(void)
 {
-	int sx = 0, sy = 0;
+	int sx = 0, sy = 0, raw_max = 0;
 
 	for (int i = 0; i < 32; i++) {
 		int x, y;
@@ -370,57 +351,72 @@ static bool joy_calibrate(void)
 			return false;
 		sx += x;
 		sy += y;
+		if (x > raw_max)
+			raw_max = x;
+		if (y > raw_max)
+			raw_max = y;
 		vTaskDelay(pdMS_TO_TICKS(10));
 	}
-	int mx = sx / 32, my = sy / 32;
+	joy_cx = sx / 32;
+	joy_cy = sy / 32;
+	joy_max = raw_max > JOY_RAW_12BIT_MAX ? JOY_RAW_16BIT_MAX
+					      : JOY_RAW_12BIT_MAX;
+	joy_deadzone = joy_max * JOY_DEADZONE_PCT / 100;
+	ESP_LOGI(TAG, "stick center X=%d Y=%d, range 0..%d, deadzone %d",
+		 joy_cx, joy_cy, joy_max, joy_deadzone);
+	joy_log_offset();
+	if (joy_cx < joy_max / 8 || joy_cx > joy_max * 7 / 8 ||
+	    joy_cy < joy_max / 8 || joy_cy > joy_max * 7 / 8)
+		ESP_LOGW(TAG, "stick center is far from mid-scale; "
+			 "held during boot or mounted oddly");
+	return true;
+}
 
-	joy_cx = JOY_X_CENTER;
-	joy_cy = JOY_Y_CENTER;
-	ESP_LOGI(TAG, "stick measured X=%d Y=%d, using center X=%d Y=%d",
-		 mx, my, joy_cx, joy_cy);
-	if (mx < JOY_X_MIN || mx > JOY_X_MAX ||
-	    my < JOY_Y_MIN || my > JOY_Y_MAX)
-		ESP_LOGW(TAG, "stick was not at rest during boot");
-	if (!joy_at_rest(mx, my)) {
-		joy_absent = true;
-		ESP_LOGW(TAG, "stick not connected or held at boot; "
-			 "ignoring it until it rests near center");
+static bool joy_probe(void)
+{
+	uint8_t fw = 0;
+
+	if (!joy_i2c_read(JOY_REG_FW, &fw, 1))
+		return false;
+	ESP_LOGI(TAG, "Unit Joystick2 found, firmware %u", fw);
+	return true;
+}
+
+static bool joy_open(int hz)
+{
+	i2c_master_bus_handle_t bus = NULL;
+	i2c_device_config_t dev_cfg = {
+		.dev_addr_length = I2C_ADDR_BIT_LEN_7,
+		.device_address = JOY_I2C_ADDR,
+		.scl_speed_hz = hz,
+	};
+
+	if (i2c_master_get_bus_handle(ES8311_I2C_NUM, &bus) != ESP_OK || !bus) {
+		ESP_LOGW(TAG, "no I2C bus available for the joystick");
+		return false;
+	}
+	if (i2c_master_bus_add_device(bus, &dev_cfg, &joy_dev) != ESP_OK ||
+	    !joy_probe()) {
+		if (joy_dev) {
+			i2c_master_bus_rm_device(joy_dev);
+			joy_dev = NULL;
+		}
+		return false;
 	}
 	return true;
 }
 
 static bool joy_init(void)
 {
-	adc_unit_t x_unit, y_unit;
-
-	if (adc_oneshot_io_to_channel(JOY_X_GPIO, &x_unit, &joy_x_ch) != ESP_OK ||
-	    adc_oneshot_io_to_channel(JOY_Y_GPIO, &y_unit, &joy_y_ch) != ESP_OK ||
-	    x_unit != y_unit || x_unit != ADC_UNIT_2) {
-		ESP_LOGW(TAG, "joystick not available");
-		return false;
+	if (!joy_open(JOY_I2C_HZ)) {
+		ESP_LOGW(TAG, "joystick silent at %d Hz, retrying at %d Hz",
+			 JOY_I2C_HZ, JOY_I2C_HZ_SLOW);
+		if (!joy_open(JOY_I2C_HZ_SLOW)) {
+			ESP_LOGW(TAG, "joystick not found at 0x%02X "
+				 "(check SDA/SCL wiring)", JOY_I2C_ADDR);
+			return false;
+		}
 	}
-
-	adc = board_adc2_get();
-	if (!adc) {
-		ESP_LOGW(TAG, "ADC2 not initialized");
-		return false;
-	}
-
-	adc_oneshot_chan_cfg_t chan_cfg = {
-		.atten = ADC_ATTEN_DB_12,
-		.bitwidth = ADC_BITWIDTH_DEFAULT,
-	};
-	if (adc_oneshot_config_channel(adc, joy_x_ch, &chan_cfg) != ESP_OK ||
-	    adc_oneshot_config_channel(adc, joy_y_ch, &chan_cfg) != ESP_OK)
-		return false;
-
-	ESP_LOGI(TAG, "GPIO%d/GPIO%d configuration:",
-		 JOY_X_GPIO, JOY_Y_GPIO);
-	gpio_dump_io_configuration(stdout,
-				   (1ULL << JOY_X_GPIO) |
-				   (1ULL << JOY_Y_GPIO));
-	fflush(stdout);
-
 	return joy_calibrate();
 }
 
@@ -747,33 +743,32 @@ static void gamepad_task(void *arg)
 			int dx = x - joy_cx;
 			int dy = y - joy_cy;
 
-			if (joy_absent_check(x, y)) {
-				for (int i = 0; i < 4; i++) {
-					stick_stable[i] = false;
-					stick_debounce[i] = 0;
-				}
-			} else {
-				if (dx * dx + dy * dy > JOY_DEADZONE * JOY_DEADZONE) {
-					nx = axis_norm(dx, joy_cx, JOY_X_MIN, JOY_X_MAX);
-					ny = axis_norm(dy, joy_cy, JOY_Y_MIN, JOY_Y_MAX);
-					if (cfg_settings.invert_x)
-						nx = -nx;
-					if (cfg_settings.invert_y)
-						ny = -ny;
-				}
-				want[STICK_SRC_UP] = stick_debounce_dir(0,
-					dir_neg(stick_stable[0], ny,
-						JOY_DIR_PRESS, JOY_DIR_RELEASE));
-				want[STICK_SRC_DOWN] = stick_debounce_dir(1,
-					dir_pos(stick_stable[1], ny,
-						JOY_DIR_PRESS, JOY_DIR_RELEASE));
-				want[STICK_SRC_LEFT] = stick_debounce_dir(2,
-					dir_neg(stick_stable[2], nx,
-						JOY_DIR_PRESS, JOY_DIR_RELEASE));
-				want[STICK_SRC_RIGHT] = stick_debounce_dir(3,
-					dir_pos(stick_stable[3], nx,
-						JOY_DIR_PRESS, JOY_DIR_RELEASE));
+			if (dx * dx + dy * dy > joy_deadzone * joy_deadzone) {
+				nx = axis_norm(dx, joy_cx, 0, joy_max);
+				ny = axis_norm(dy, joy_cy, 0, joy_max);
+				if (cfg_settings.invert_x)
+					nx = -nx;
+				if (cfg_settings.invert_y)
+					ny = -ny;
 			}
+			if ((abs(dx) > joy_deadzone || abs(dy) > joy_deadzone) &&
+			    now - joy_log_us > 200000) {
+				joy_log_us = now;
+				ESP_LOGI(TAG, "stick X=%d Y=%d d=%d,%d",
+					 x, y, dx, dy);
+			}
+			want[STICK_SRC_UP] = stick_debounce_dir(0,
+				dir_neg(stick_stable[0], ny,
+					JOY_DIR_PRESS, JOY_DIR_RELEASE));
+			want[STICK_SRC_DOWN] = stick_debounce_dir(1,
+				dir_pos(stick_stable[1], ny,
+					JOY_DIR_PRESS, JOY_DIR_RELEASE));
+			want[STICK_SRC_LEFT] = stick_debounce_dir(2,
+				dir_neg(stick_stable[2], nx,
+					JOY_DIR_PRESS, JOY_DIR_RELEASE));
+			want[STICK_SRC_RIGHT] = stick_debounce_dir(3,
+				dir_pos(stick_stable[3], nx,
+					JOY_DIR_PRESS, JOY_DIR_RELEASE));
 		} else {
 			for (int i = 0; i < 4; i++) {
 				stick_stable[i] = false;
