@@ -285,6 +285,8 @@ P4-specific notes:
   ; Unit Joystick2 reads 0/0 on this board; set 1 to flip an axis
   ; InvertX = 0
   ; InvertY = 0
+  ; radial deadzone, percent of full scale (0-50)
+  ; Deadzone = 4
   ```
 
   `cmd` is typed once DOS shows its prompt (Enter is appended). Adding a game
@@ -295,7 +297,9 @@ P4-specific notes:
   Alongside C/D, the schematic names X/Y and L1/R1 are accepted.
   `ShopCycle = 1` makes the stick's push button walk through
   Shift+F1..F10, Ctrl+F1..F10 then Alt+F1..F10 while held (release stops it);
-  per-game key remaps and `Mouse = 1` work as usual.
+  per-game key remaps and `Mouse = 1` work as usual. The global `[gamepad]`
+  section also takes `Deadzone` (radial, percent of full scale, 0-50, default
+  4) and `InvertX`/`InvertY`.
 - Each card shows the title above a scaled thumbnail; the cards scroll
   horizontally with drag, fling and snap. The
   strip is pre-rendered in PSRAM once, so a scroll frame is a single DMA

@@ -129,6 +129,8 @@ static int menu_ini_handler(void *user, const char *section, const char *name,
 			pad_settings.invert_x = atoi(value) != 0;
 		else if (!strcasecmp(name, "inverty"))
 			pad_settings.invert_y = atoi(value) != 0;
+		else if (!strcasecmp(name, "deadzone"))
+			pad_settings.deadzone = atoi(value);
 		return 1;
 	}
 	if (sscanf(section, "game%d", &idx) != 1 || idx < 1 ||

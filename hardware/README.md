@@ -78,6 +78,11 @@ The bus is shared with the ES8311 codec (`0x18`) and the GT911 touch panel
 `0x20` stick button (0 = pressed), `0x50`-`0x53` factory-calibrated signed
 12-bit offsets, `0xFE` firmware version.
 
+The module is mounted rotated 90 degrees on this PCB, so the firmware swaps the
+module's X/Y in `gamepad.c` (`joy_read`). If a direction still feels inverted
+after assembly, set `InvertX`/`InvertY` in the `[gamepad]` section of
+`/sdcard/menu.ini` instead of editing the driver.
+
 ## Battery and power
 
 - 1S Li-ion on CN4: pin 1 = BAT+, pin 2 = BAT- (tied to board GND). There is

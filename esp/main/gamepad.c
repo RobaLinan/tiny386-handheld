@@ -58,7 +58,10 @@ struct gamepad_config gamepad_default_config(void)
 
 struct gamepad_settings gamepad_default_settings(void)
 {
-	struct gamepad_settings s = { .invert_x = 0, .invert_y = 0 };
+	/* Invert 0/0 for the Unit Joystick2; 4% radial deadzone unless
+	 * [gamepad] Deadzone overrides it. */
+	struct gamepad_settings s = { .invert_x = 0, .invert_y = 0,
+				      .deadzone = 4 };
 
 	return s;
 }
@@ -188,7 +191,7 @@ int gamepad_button_index(const char *name)
 #define JOY_REG_FW 0xFE
 #define JOY_RAW_12BIT_MAX 4095
 #define JOY_RAW_16BIT_MAX 65535
-#define JOY_DEADZONE_PCT 4     /* radial, percent of full scale */
+#define JOY_DEADZONE_MAX_PCT 50
 #define JOY_DIR_PRESS 120      /* normalized -1000..1000 */
 #define JOY_DIR_RELEASE 80
 #define MOUSE_MAX_STEP 10
@@ -267,7 +270,7 @@ static i2c_master_dev_handle_t joy_dev;
 static bool joy_ready;
 static int joy_cx, joy_cy;
 static int joy_max = JOY_RAW_12BIT_MAX;
-static int joy_deadzone = JOY_RAW_12BIT_MAX * JOY_DEADZONE_PCT / 100;
+static int joy_deadzone;
 static int64_t joy_log_us;
 
 enum shop_state {
@@ -354,8 +357,10 @@ static bool joy_read(int *x, int *y)
 
 	if (!joy_i2c_read(JOY_REG_RAW, buf, sizeof(buf)))
 		return false;
-	*x = buf[0] | (buf[1] << 8);
-	*y = buf[2] | (buf[3] << 8);
+	/* The module is mounted rotated 90 degrees on the PCB: its X is our Y
+	 * and its Y is our X. */
+	*x = buf[2] | (buf[3] << 8);
+	*y = buf[0] | (buf[1] << 8);
 	return true;
 }
 
@@ -380,6 +385,17 @@ static void joy_log_offset(void)
 	ESP_LOGI(TAG, "module calibrated offset X=%d Y=%d", ox, oy);
 }
 
+static void joy_apply_deadzone(void)
+{
+	int pct = cfg_settings.deadzone;
+
+	if (pct < 0)
+		pct = 0;
+	if (pct > JOY_DEADZONE_MAX_PCT)
+		pct = JOY_DEADZONE_MAX_PCT;
+	joy_deadzone = joy_max * pct / 100;
+}
+
 static bool joy_calibrate(void)
 {
 	int sx = 0, sy = 0, raw_max = 0;
@@ -401,7 +417,7 @@ static bool joy_calibrate(void)
 	joy_cy = sy / 32;
 	joy_max = raw_max > JOY_RAW_12BIT_MAX ? JOY_RAW_16BIT_MAX
 					      : JOY_RAW_12BIT_MAX;
-	joy_deadzone = joy_max * JOY_DEADZONE_PCT / 100;
+	joy_apply_deadzone();
 	ESP_LOGI(TAG, "stick center X=%d Y=%d, range 0..%d, deadzone %d",
 		 joy_cx, joy_cy, joy_max, joy_deadzone);
 	joy_log_offset();
@@ -801,10 +817,11 @@ static void load_config(void)
 	if (s)
 		cfg_settings = *s;
 #endif
-	ESP_LOGI(TAG, "mouse=%d shop=%d invert=%d/%d keys %04X %04X %04X %04X "
+	joy_apply_deadzone();
+	ESP_LOGI(TAG, "mouse=%d shop=%d invert=%d/%d dz=%d keys %04X %04X %04X %04X "
 		      "%02X %02X %02X %02X %02X %02X %02X %02X",
 		 cfg.mouse, cfg.shop_cycle, cfg_settings.invert_x,
-		 cfg_settings.invert_y,
+		 cfg_settings.invert_y, cfg_settings.deadzone,
 		 cfg.key[PAD_UP], cfg.key[PAD_DOWN], cfg.key[PAD_LEFT],
 		 cfg.key[PAD_RIGHT], cfg.key[PAD_A], cfg.key[PAD_B],
 		 cfg.key[PAD_C], cfg.key[PAD_D], cfg.key[PAD_SELECT],
@@ -815,9 +832,9 @@ static void gamepad_task(void *arg)
 {
 	(void) arg;
 
+	cfg_settings = gamepad_default_settings();
 	matrix_init();
 	joy_ready = joy_init();
-	cfg_settings = gamepad_default_settings();
 
 	bool menu_mode = true;
 
@@ -965,6 +982,7 @@ void gamepad_set_settings(const struct gamepad_settings *settings)
 {
 	if (settings)
 		cfg_settings = *settings;
+	joy_apply_deadzone();
 }
 
 #else /* !USE_GAMEPAD */

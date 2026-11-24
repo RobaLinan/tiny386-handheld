@@ -28,6 +28,7 @@ struct gamepad_config {
 struct gamepad_settings {
 	int invert_x;
 	int invert_y;
+	int deadzone;              /* radial, percent of full scale (0-50) */
 };
 
 struct gamepad_config gamepad_default_config(void);
