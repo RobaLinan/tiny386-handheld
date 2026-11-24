@@ -37,10 +37,12 @@ Matrix wiring to P1 (P1 pin numbers on the module):
 | GND | GND | 5, 6 or 16 |
 
 Rows are driven high one at a time (10 ms poll, 3-sample debounce in
-`esp/main/gamepad.c`); columns have pull-downs. On this PCB revision the Down
-and Left switches are wired to each other's columns, which the firmware
-compensates for in `pad_map[]` — do not "fix" the table when editing the scan
-code.
+`esp/main/gamepad.c`); columns have pull-downs. In the assembled harness the
+two middle column wires (schematic GPIO32/GPIO33) are crossed, so each row's
+2nd and 3rd keys arrive swapped: Down/Left, B/X and OK/L2. `pad_map[]`
+compensates for that — do not "fix" the table when editing the scan code. To
+restore the schematic order, swap those two wires at J_COL and set
+`pad_map[]` back to `Up Down Left Right / A B C D / Select OK L2 R2`.
 
 P1 pinout for reference (odd pins on one row, even on the other):
 

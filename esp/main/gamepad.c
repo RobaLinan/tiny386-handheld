@@ -233,11 +233,12 @@ static const gpio_num_t col_gpio[COL_N] = {
 	GPIO_NUM_31, GPIO_NUM_32, GPIO_NUM_33, GPIO_NUM_52
 };
 
-/* The PCB wires the Down and Left switches to each other's columns. */
+/* The J_COL harness crosses the two middle column wires (schematic
+ * GPIO32/GPIO33), so each row's 2nd and 3rd keys arrive swapped. */
 static const uint8_t pad_map[ROW_N * COL_N] = {
 	PAD_UP, PAD_LEFT, PAD_DOWN, PAD_RIGHT,
-	PAD_A, PAD_B, PAD_C, PAD_D,
-	PAD_SELECT, PAD_OK, PAD_L2, PAD_R2,
+	PAD_A, PAD_C, PAD_B, PAD_D,
+	PAD_SELECT, PAD_L2, PAD_OK, PAD_R2,
 };
 
 static struct gamepad_config cfg;
